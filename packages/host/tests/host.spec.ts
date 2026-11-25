@@ -300,8 +300,16 @@ describe('agent tools', () => {
     expect(guidance).toContain('design_status')
     expect(guidance).toContain('Variants')
     expect(handoff).toContain('design_handoff')
-    expect(handoff).not.toContain('design_capture')
     expect(handoff).toContain('manifest')
+  })
+
+  it('offers local preview and handoff without live app capture', async () => {
+    const h = await harness()
+    expect(h.tools.has('design_view')).toBe(true)
+    expect(h.tools.has('design_handoff')).toBe(true)
+    expect(h.tools.has('design_capture')).toBe(false)
+    expect(h.promptSections.map((section) => section.name)).not.toContain('design:capture')
+    for (const section of h.promptSections) expect(section.text).not.toContain('design_capture')
   })
 
   it('reports a missing project and scaffolds one', async () => {

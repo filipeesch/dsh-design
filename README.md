@@ -55,6 +55,9 @@ then lists the **Design** agent preset, and the preview route answers under
 `design_run_journey`, `design_lint`, `design_screenshot`, `design_query`,
 `design_diff`, and `design_handoff`.
 
+Live capture of external development applications is deferred and is not
+included in this bundle. Preview and handoff operate on local design sources.
+
 A session whose working directory contains `design/design.json` gets a live
 preview. The agent shares the URL from `design_status`; open it in a normal
 browser tab while signed in to DSH, or use the native **Design** action in the
