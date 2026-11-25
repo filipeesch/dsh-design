@@ -1,0 +1,38 @@
+<Screen id="catalog" title="Synthetic variants" states={{ "filters-open": { open: ["filters"], values: { search: "aurora" } } }}>
+  <Header title="Nimbus Outfitters" />
+  <Variants id="layout" chosen="compact">
+    <Variant branch="compact">
+      <Stack gap="spacing.sm" padding="spacing.md">
+        <Text variant="heading">Compact catalog</Text>
+        <Input id="search" label="Search" />
+        <List id="products" items={fixture("products")} gap="spacing.sm">
+          <ItemTemplate>
+            <ListItem><Text>{item("name")}</Text><Text color="color.text">{item("price")}</Text></ListItem>
+          </ItemTemplate>
+        </List>
+        <Stack id="actions" gap="spacing.sm">
+          <Button id="open-filters" onPress={open("filters")}>Filters</Button>
+          <Button id="checkout" variant="primary">Checkout</Button>
+        </Stack>
+      </Stack>
+    </Variant>
+    <Variant branch="spacious">
+      <Stack gap="spacing.lg" padding="spacing.lg">
+        <Text variant="heading">Spacious catalog</Text>
+        <Input id="search" label="Search" />
+        <List id="products" items={fixture("products")} gap="spacing.md">
+          <ItemTemplate>
+            <ListItem><Text>{item("name")}</Text><Text color="color.text">{item("price")}</Text></ListItem>
+          </ItemTemplate>
+        </List>
+        <Stack id="actions" gap="spacing.sm">
+          <Button id="open-filters" onPress={open("filters")}>Filters</Button>
+        </Stack>
+        <Stack id="footer" gap="spacing.sm">
+          <Button id="checkout" variant="primary">Continue</Button>
+        </Stack>
+      </Stack>
+    </Variant>
+  </Variants>
+  <Drawer id="filters" title="Filters"><Text>Filter panels</Text><Button id="close-filters" onPress={close("filters")}>Close</Button></Drawer>
+</Screen>

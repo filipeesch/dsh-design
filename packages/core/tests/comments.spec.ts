@@ -143,6 +143,13 @@ describe('comment batch formatting', () => {
     expect(lines.some((line) => line.startsWith('   Context: '))).toBe(true)
   })
 
+  it('carries the effective variant in the sent batch', () => {
+    const message = formatCommentBatch([draft({ context: { ...context, variant: 'layout:spacious' } })])
+    expect(message).toContain('variant=layout:spacious')
+    expect(parseCommentContext({ ...context, variant: 'layout:spacious' }).ok).toBe(true)
+    expect(parseCommentContext({ ...context, variant: 'bad\u0000id' }).ok).toBe(false)
+  })
+
   it('returns an empty message for an empty batch', () => {
     expect(formatCommentBatch([])).toBe('')
   })

@@ -6,6 +6,7 @@ import { extname, join, resolve } from 'node:path'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { chromium, type Browser, type Page } from 'playwright-core'
 import { parseScreen } from '../../core/src/parse.ts'
+import { resolveVariantDocument } from '../../core/src/variants.ts'
 import { fingerprintDesignTree } from '../../core/src/fingerprint.ts'
 import { deterministicDocument } from '../../host/src/deterministic.ts'
 import type { NamedState } from '@filipeesch/dsh-design-core'
@@ -46,6 +47,97 @@ const reconcileSource = (order: readonly string[]): string =>
   '<Screen id="reconcile" title="Reconcile"><Stack gap="spacing.md"><Input id="search" label="Search" /><List id="orders-list" gap="spacing.sm">' +
   order.map((id) => '<ListItem id="orders-list-' + id + '"><Text>' + id + '</Text></ListItem>').join('') +
   '</List><Button id="open-filters" onPress={open("filters")}>Filters</Button></Stack><Drawer id="filters" title="Filters"><Text>Drawer body</Text></Drawer></Screen>'
+
+let variantDemoSource = [
+  '<Screen id="variant-demo" title="Variants">',
+  '  <Text>Hello preview</Text>',
+  '  <Variants id="layout" chosen="compact">',
+  '    <Variant branch="compact">',
+  '      <Stack gap="spacing.md"><Text>Compact pane</Text><Button id="open" onPress={open("filters")}>Open</Button><Button id="go-other" onPress={navigate("other")}>Go other</Button><Input id="name" label="Name" /><Drawer id="filters" title="Filters"><Text>Compact drawer</Text></Drawer></Stack>',
+  '    </Variant>',
+  '    <Variant branch="spacious">',
+  '      <Stack gap="spacing.md"><Text>Spacious pane</Text><Button id="open">Open</Button><Input id="name" label="Name" /><Drawer id="filters" title="Filters"><Text>Spacious drawer</Text></Drawer></Stack>',
+  '    </Variant>',
+  '  </Variants>',
+  '</Screen>',
+].join('\n')
+
+let variantDemoBroken: 'stale' | 'none' | undefined
+
+function otherVariantScreen(): WireScreen {
+  const parsed = parseScreen('<Screen id="other" title="Other"><Text>Other screen</Text></Screen>', 'screens/other.dsx')
+  return {
+    id: 'other',
+    file: 'screens/other.dsx',
+    root: parsed.root,
+    lastValidRoot: parsed.root,
+    diagnostics: [],
+    errors: 0,
+    warnings: 0,
+    blockingErrors: 0,
+  }
+}
+
+function variantDemoScreen(branch: 'compact' | 'spacious'): WireScreen {
+  const parsed = parseScreen(variantDemoSource, 'screens/variant-demo.dsx')
+  const projection = resolveVariantDocument(parsed.document!, branch === 'compact' ? {} : { layout: 'spacious' })
+  if (projection.screen === undefined) throw new Error('variant projection failed')
+  return {
+    id: 'variant-demo',
+    file: 'screens/variant-demo.dsx',
+    root: projection.screen,
+    lastValidRoot: projection.screen,
+    diagnostics:
+      branch === 'spacious' && variantDemoBroken === 'stale'
+        ? [
+            {
+              severity: 'error',
+              code: 'branch-invalid',
+              file: 'screens/variant-demo.dsx',
+              line: 7,
+              column: 5,
+              message: 'The spacious source is invalid; showing the last valid projection.',
+              branch: 'spacious',
+            },
+          ]
+        : [],
+    errors: 0,
+    warnings: 0,
+    blockingErrors: 0,
+    variants: [
+      {
+        id: 'layout',
+        path: 'layout',
+        chosen: 'compact',
+        source: { file: 'screens/variant-demo.dsx', line: 3, column: 3 },
+        wholeScreen: false,
+        branches: [
+          {
+            id: 'compact',
+            source: { file: 'screens/variant-demo.dsx', line: 4, column: 5 },
+            valid: true,
+            diagnostics: [],
+          },
+          {
+            id: 'spacious',
+            source: { file: 'screens/variant-demo.dsx', line: 7, column: 5 },
+            valid: variantDemoBroken === undefined,
+            ...(variantDemoBroken === 'stale' ? { stale: true } : {}),
+            diagnostics: [],
+          },
+        ],
+      },
+    ],
+    variant: {
+      group: 'layout',
+      path: 'layout',
+      branch,
+      chosen: branch === 'compact',
+      selection: branch === 'compact' ? { layout: 'compact' } : { layout: 'spacious' },
+    },
+    ...(branch === 'spacious' && variantDemoBroken === 'stale' ? { variantStale: true } : {}),
+  }
+}
 
 function allScreens(revision: number, reconcile: readonly string[] = ['order-1', 'order-2']): ProjectPayload {
   return payload(revision, [
@@ -149,6 +241,8 @@ function commentSnapshot(): Record<string, unknown> {
 }
 
 beforeEach(() => {
+  variantDemoBroken = undefined
+  variantDemoSource = variantDemoSource.replace('Spacious recovered', 'Spacious pane')
   comments = []
   commentSequence = 1
   commentRevision = 0
@@ -235,6 +329,14 @@ beforeAll(async () => {
     }
     if (apiPath === '/_/project') {
       res.writeHead(200, { 'content-type': 'application/json' })
+      const variant = url.searchParams.get('variant')
+      if (url.searchParams.get('screen') === 'variant-demo' && variant !== null) {
+        const index = variant.lastIndexOf(':')
+        const branch = index < 0 ? '' : variant.slice(index + 1)
+        const selected = branch === 'spacious' ? variantDemoScreen('spacious') : variantDemoScreen('compact')
+        res.end(JSON.stringify(payload(current.revision, [selected, otherVariantScreen()])))
+        return
+      }
       res.end(JSON.stringify(current))
       return
     }
@@ -293,6 +395,18 @@ afterAll(async () => {
   await browser?.close()
   await new Promise<void>((closed) => (server === undefined ? closed() : server.close(() => closed())))
 })
+
+async function comparePageAt(viewport: { width: number; height: number }, path: string): Promise<Page> {
+  if (browser === undefined) throw new Error('Chromium is unavailable')
+  const context = await browser.newContext({ viewport })
+  const page = await context.newPage()
+  page.on('pageerror', (error) => console.log('compare page error: ' + String(error)))
+  page.setDefaultTimeout(10000)
+  await page.goto(base + path, { waitUntil: 'domcontentloaded' })
+  await page.waitForSelector('.dsx-compare')
+  await page.waitForTimeout(250)
+  return page
+}
 
 async function pageAt(viewport: { width: number; height: number }, path: string): Promise<Page> {
   if (browser === undefined) throw new Error('Chromium is unavailable')
@@ -783,4 +897,274 @@ describe('real browser preview regressions', async () => {
       }
     },
   )
+  describe('real browser variant comparison', () => {
+    it.skipIf(chromiumPath === undefined)(
+      'keeps exact widths, isolated interaction and focus, and keyboard scrolling at desktop width',
+      async () => {
+        variantDemoSource = variantDemoSource.replace('Compact pane edited', 'Compact pane')
+        current = payload(30, [variantDemoScreen('compact')])
+        const page = await comparePageAt(
+          { width: 1440, height: 900 },
+          '/design/session-test/variant-demo?compare=layout:compact:spacious&bp=desktop',
+        )
+        try {
+          await page.locator('iframe[data-dsx-pane="left"]').waitFor({ state: 'visible' })
+          await page.locator('iframe[data-dsx-pane="right"]').waitFor({ state: 'visible' })
+          const left = page.frameLocator('iframe[data-dsx-pane="left"]')
+          const right = page.frameLocator('iframe[data-dsx-pane="right"]')
+          await left.locator('.dsx-frame').waitFor()
+          await right.locator('.dsx-frame').waitFor()
+          await left.getByText('Compact pane').waitFor()
+          await right.getByText('Spacious pane').waitFor()
+          expect(await left.locator('.dsx-frame').evaluate((element) => element.getBoundingClientRect().width)).toBe(
+            1280,
+          )
+          expect(await right.locator('.dsx-frame').evaluate((element) => element.getBoundingClientRect().width)).toBe(
+            1280,
+          )
+          expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(1440)
+
+          await left.getByRole('button', { name: 'Open' }).click()
+          await left.getByText('Compact drawer').waitFor({ state: 'visible' })
+          await page.waitForTimeout(150)
+          expect(await right.getByText('Spacious drawer').count()).toBe(0)
+          const leftFrame = page.frames().find((frame) => frame.url().includes('pane=left'))
+          expect(leftFrame).toBeDefined()
+          const leftFocus = await leftFrame!.evaluate(
+            () =>
+              document.activeElement?.closest('[role="dialog"]') !== null ||
+              document.activeElement?.closest('[data-dsx-id="filters"]') !== null,
+          )
+          expect(leftFocus).toBe(true)
+          await leftFrame!.evaluate(() => {
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+          })
+          await page.waitForTimeout(150)
+
+          await right.locator('[data-dsx-id="name"] input').fill('Only right')
+          expect(await left.locator('[data-dsx-id="name"] input').inputValue()).toBe('')
+
+          const scroller = page.locator('.dsx-compare-scroll')
+          await scroller.focus()
+          const dimensions = await scroller.evaluate((element) => ({
+            scrollWidth: element.scrollWidth,
+            clientWidth: element.clientWidth,
+          }))
+          expect(dimensions.scrollWidth).toBeGreaterThan(dimensions.clientWidth)
+          await scroller.press('ArrowRight')
+          await scroller.press('ArrowRight')
+          await page.waitForTimeout(200)
+          expect(await scroller.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0)
+        } finally {
+          await page.context().close()
+        }
+      },
+    )
+
+    it.skipIf(chromiumPath === undefined)(
+      'stays side by side with internal scrolling at 390 CSS pixels and restores history',
+      async () => {
+        variantDemoSource = variantDemoSource.replace('Compact pane edited', 'Compact pane')
+        current = payload(31, [variantDemoScreen('compact')])
+        const page = await comparePageAt(
+          { width: 390, height: 844 },
+          '/design/session-test/variant-demo?compare=layout:compact:spacious&bp=mobile',
+        )
+        try {
+          await page.locator('iframe[data-dsx-pane="left"]').waitFor({ state: 'visible' })
+          const left = page.frameLocator('iframe[data-dsx-pane="left"]')
+          const right = page.frameLocator('iframe[data-dsx-pane="right"]')
+          await left.locator('.dsx-frame').waitFor()
+          await right.locator('.dsx-frame').waitFor()
+          expect(await left.locator('.dsx-frame').evaluate((element) => element.getBoundingClientRect().width)).toBe(
+            390,
+          )
+          expect(await right.locator('.dsx-frame').evaluate((element) => element.getBoundingClientRect().width)).toBe(
+            390,
+          )
+          expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
+          const scroller = page.locator('.dsx-compare-scroll')
+          expect(await scroller.evaluate((element) => element.clientWidth)).toBeLessThanOrEqual(390)
+          expect(await scroller.evaluate((element) => element.scrollWidth)).toBeGreaterThan(390)
+          await scroller.press('ArrowRight')
+          await scroller.press('ArrowRight')
+          await page.waitForTimeout(150)
+          expect(await scroller.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0)
+
+          await page.getByLabel('Right branch').selectOption('compact')
+          await page.waitForFunction(
+            () => new URLSearchParams(window.location.search).get('compare') === 'layout:compact:compact',
+          )
+          await page.evaluate(() => history.back())
+          await page.waitForTimeout(500)
+          await page.waitForFunction(
+            () => new URLSearchParams(window.location.search).get('compare') === 'layout:compact:spacious',
+          )
+          await left.locator('.dsx-frame').waitFor()
+          expect(await left.getByText('Compact pane').count()).toBe(1)
+        } finally {
+          await page.context().close()
+        }
+      },
+    )
+
+    it.skipIf(chromiumPath === undefined)('keeps a deterministic comparison one self-contained canvas', async () => {
+      variantDemoSource = variantDemoSource.replace('Compact pane edited', 'Compact pane')
+      current = payload(34, [variantDemoScreen('compact')])
+      const page = await pageAt(
+        { width: 390, height: 844 },
+        '/design/session-test/variant-demo?compare=layout:compact:spacious&bp=mobile&deterministic=1',
+      )
+      try {
+        await page.getByText('Compact pane').waitFor()
+        expect(await page.locator('.dsx-compare').count()).toBe(0)
+        expect((page as Page & { requests: string[] }).requests).toHaveLength(1)
+      } finally {
+        await page.context().close()
+      }
+    })
+
+    it.skipIf(chromiumPath === undefined)(
+      'resets both panes to the parent screen when a shared control changes after in-pane navigation',
+      async () => {
+        variantDemoBroken = undefined
+        current = payload(60, [variantDemoScreen('compact'), otherVariantScreen()])
+        const page = await comparePageAt(
+          { width: 1440, height: 900 },
+          '/design/session-test/variant-demo?compare=layout:compact:spacious&bp=desktop',
+        )
+        try {
+          const left = page.frameLocator('iframe[data-dsx-pane="left"]')
+          const right = page.frameLocator('iframe[data-dsx-pane="right"]')
+          await left.getByText('Compact pane').waitFor()
+          await right.getByText('Spacious pane').waitFor()
+          await left.locator('[data-dsx-id="name"] input').fill('kept before navigation')
+          await left.getByRole('button', { name: 'Go other' }).click()
+          await left.getByText('Other screen').waitFor()
+          const navigated = page.frames().find((frame) => frame.url().includes('pane=left'))
+          expect(navigated?.url()).toContain('/design/session-test/other')
+          await page.getByLabel('Right branch').selectOption('compact')
+          await page.waitForFunction(
+            () => new URLSearchParams(window.location.search).get('compare') === 'layout:compact:compact',
+          )
+          await left.getByText('Compact pane').waitFor()
+          await page.waitForTimeout(300)
+          expect(await left.locator('[data-dsx-id="name"] input').inputValue()).toBe('')
+          const reset = page.frames().find((frame) => frame.url().includes('pane=left'))
+          expect(reset?.url()).toContain('/design/session-test/variant-demo')
+
+          await page.evaluate(() => history.back())
+          await page.waitForFunction(
+            () => new URLSearchParams(window.location.search).get('compare') === 'layout:compact:spacious',
+          )
+          await page.waitForTimeout(300)
+          await left.getByText('Compact pane').waitFor()
+          await right.getByText('Spacious pane').waitFor()
+        } finally {
+          await page.context().close()
+        }
+      },
+    )
+
+    it.skipIf(chromiumPath === undefined)(
+      'preserves compatible pane interaction through a valid SSE refresh',
+      async () => {
+        variantDemoBroken = undefined
+        current = payload(61, [variantDemoScreen('compact')])
+        const page = await comparePageAt(
+          { width: 1440, height: 900 },
+          '/design/session-test/variant-demo?compare=layout:compact:spacious&bp=desktop',
+        )
+        try {
+          const left = page.frameLocator('iframe[data-dsx-pane="left"]')
+          await left.getByText('Compact pane').waitFor()
+          await left.getByRole('button', { name: 'Open' }).click()
+          await left.getByText('Compact drawer').waitFor({ state: 'visible' })
+          await left.locator('[data-dsx-id="name"] input').fill('preserved')
+          publish({ ...current, revision: 62 })
+          await page.waitForTimeout(1500)
+          expect(await left.getByText('Compact drawer').count()).toBe(1)
+          expect(await left.locator('[data-dsx-id="name"] input').inputValue()).toBe('preserved')
+        } finally {
+          await page.context().close()
+        }
+      },
+    )
+
+    it.skipIf(chromiumPath === undefined)(
+      'keeps the last valid comparison pane through an invalid alternate edit and recovers in place',
+      async () => {
+        variantDemoBroken = undefined
+        current = payload(63, [variantDemoScreen('compact')])
+        const page = await comparePageAt(
+          { width: 1440, height: 900 },
+          '/design/session-test/variant-demo?compare=layout:compact:spacious&bp=desktop',
+        )
+        try {
+          const right = page.frameLocator('iframe[data-dsx-pane="right"]')
+          await right.getByText('Spacious pane').waitFor()
+          const compareUrl = page.url()
+          variantDemoBroken = 'stale'
+          current = payload(64, [variantDemoScreen('compact')])
+          publish(current)
+          await page.getByText('last valid · diagnostics').waitFor()
+          await right.getByText('Spacious pane').waitFor()
+          expect(await page.locator('iframe[data-dsx-pane="right"]').count()).toBe(1)
+          variantDemoSource = variantDemoSource.replace('Spacious pane', 'Spacious recovered')
+          variantDemoBroken = undefined
+          current = payload(65, [variantDemoScreen('compact')])
+          publish(current)
+          await right.getByText('Spacious recovered').waitFor({ timeout: 10000 })
+          expect(page.url()).toBe(compareUrl)
+        } finally {
+          await page.context().close()
+        }
+      },
+    )
+
+    it.skipIf(chromiumPath === undefined)(
+      'mounts a repaired comparison pane that started without a prior snapshot',
+      async () => {
+        variantDemoBroken = 'none'
+        current = payload(66, [variantDemoScreen('compact')])
+        const page = await comparePageAt(
+          { width: 1440, height: 900 },
+          '/design/session-test/variant-demo?compare=layout:compact:spacious&bp=desktop',
+        )
+        try {
+          await page.getByText('Branch unavailable').waitFor()
+          expect(await page.locator('iframe[data-dsx-pane="right"]').count()).toBe(0)
+          const compareUrl = page.url()
+          variantDemoBroken = undefined
+          current = payload(67, [variantDemoScreen('compact')])
+          publish(current)
+          const right = page.frameLocator('iframe[data-dsx-pane="right"]')
+          await right.getByText('Spacious pane').waitFor({ timeout: 10000 })
+          expect(page.url()).toBe(compareUrl)
+        } finally {
+          await page.context().close()
+        }
+      },
+    )
+
+    it.skipIf(chromiumPath === undefined)('live reloads both panes from the same starting selection', async () => {
+      variantDemoSource = variantDemoSource.replace('Compact pane edited', 'Compact pane')
+      current = payload(32, [variantDemoScreen('compact')])
+      const page = await comparePageAt(
+        { width: 1440, height: 900 },
+        '/design/session-test/variant-demo?compare=layout:compact:spacious&bp=desktop',
+      )
+      try {
+        const left = page.frameLocator('iframe[data-dsx-pane="left"]')
+        await left.getByText('Compact pane').waitFor()
+        variantDemoSource = variantDemoSource.replace('Compact pane', 'Compact pane edited')
+        publish({ ...current, revision: 33 })
+        await left.getByText('Compact pane edited').waitFor({ timeout: 10000 })
+        const right = page.frameLocator('iframe[data-dsx-pane="right"]')
+        expect(await right.getByText('Spacious pane').count()).toBe(1)
+      } finally {
+        await page.context().close()
+      }
+    })
+  })
 })

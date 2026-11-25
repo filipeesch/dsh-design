@@ -11,7 +11,7 @@ Exploring a design means trying alternatives and comparing them side by side bef
 - Promotion: the chosen variant replaces the variants block in the source, and the other variants move to `design/.discarded/`, a git-ignored folder, with their origin and date. A cleanup step empties it when the exploration ends.
 - `design_diff`: a semantic diff (nodes added, removed, moved, and props changed) between two variants or between two git revisions of a screen.
 - Only chosen variants count for the handoff; comments record the variant they were made on.
-- To decide when this change is planned: whether promotion is a tool or a text edit guided by the preset, given the decision that edits are made directly in text.
+- Promotion is a direct source edit guided by the preset, not a new mutating tool or a browser action.
 
 ## Capabilities
 
@@ -25,6 +25,8 @@ Exploring a design means trying alternatives and comparing them side by side bef
 - `design-project`: the git-ignored `.discarded/` folder.
 - `design-preview-server`: compare mode.
 - `design-agent-tools`: `design_diff` and variant awareness in existing tools.
+- `design-comments`: isolate pins and preserve variant context.
+- `design-agent-preset`: guide exploration, promotion and explicit cleanup without a new writer.
 
 ## Impact
 

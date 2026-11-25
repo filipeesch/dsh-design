@@ -442,6 +442,70 @@ export function extractNamedStates(root: DesignScreenNode, file: string, kit: Ki
   return { root: stripped, states, diagnostics }
 }
 
+/**
+ * Report named-state targets that are not compatible with one resolved
+ * projection. The chosen projection is validated on load; an alternate
+ * projection can lack a target, which is diagnosed instead of silently
+ * substituting a different state.
+ */
+export function stateCompatibility(root: DesignScreenNode, named: NamedState, kit: KitMetadata): string[] {
+  const nodes = indexNodes(root)
+  const issues: string[] = []
+  for (const id of named.open) {
+    const target = nodes.get(id)
+    if (target === undefined) {
+      issues.push('opens "' + id + '", which this projection does not render')
+      continue
+    }
+    const meta = kit[target.type]
+    if (meta === undefined || !meta.overlay)
+      issues.push('opens "' + id + '", which is not an overlay in this projection')
+  }
+  for (const [id, value] of Object.entries(named.tabs)) {
+    const target = nodes.get(id)
+    if (target === undefined) {
+      issues.push('selects tab "' + id + '", which this projection does not render')
+      continue
+    }
+    if (target.type !== 'Tabs') {
+      issues.push('selects tab "' + id + '", which is not a Tabs node in this projection')
+      continue
+    }
+    const values = tabValues(target as DesignElement)
+    if (values.length > 0 && !values.includes(value)) {
+      issues.push('selects tab "' + id + '" value "' + value + '", which this projection does not declare')
+    }
+  }
+  for (const [id, value] of Object.entries(named.values)) {
+    const target = nodes.get(id)
+    if (target === undefined) {
+      issues.push('assigns value to "' + id + '", which this projection does not render')
+      continue
+    }
+    const type = target.type
+    if (STRING_VALUE_TYPES.has(type)) {
+      if (typeof value !== 'string') issues.push('assigns a non-string value to <' + type + '> "' + id + '"')
+      continue
+    }
+    if (BOOLEAN_VALUE_TYPES.has(type)) {
+      if (typeof value !== 'boolean') issues.push('assigns a non-boolean value to <' + type + '> "' + id + '"')
+      continue
+    }
+    if (STRING_ARRAY_VALUE_TYPES.has(type)) {
+      if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
+        issues.push('assigns a non-string-array value to <' + type + '> "' + id + '"')
+      }
+      continue
+    }
+    if (type === 'Pagination') {
+      if (typeof value !== 'number' || !Number.isFinite(value)) issues.push('assigns a non-number page to "' + id + '"')
+      continue
+    }
+    issues.push('assigns a value to <' + type + '> "' + id + '", which does not accept a seeded value')
+  }
+  return issues
+}
+
 /** Find one named state in a screen's metadata. */
 export function findNamedState(states: readonly NamedState[], name: string | undefined): NamedState | undefined {
   if (name === undefined) return undefined

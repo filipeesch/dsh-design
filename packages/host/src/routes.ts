@@ -15,7 +15,7 @@ import { CommentStore, CommentStoreError } from './comments.ts'
 import { collectDeterministicAssets, deterministicDocument } from './deterministic.ts'
 import { notFoundPage, renderShell } from './html.ts'
 import { MAX_MEDIA_BYTES, RASTER_TYPES, sniffRaster } from './media.ts'
-import { buildPayload } from './payload.ts'
+import { buildPayload, type PayloadVariantRequest } from './payload.ts'
 import type { ProjectRegistry } from './registry.ts'
 
 const TEXT_TYPES: Record<string, string> = {
@@ -280,6 +280,17 @@ async function handleComments(
   }
 }
 
+/** Parse one variant query value (group:branch) against a screen. */
+function variantRequest(search: URLSearchParams, screen: string | undefined): PayloadVariantRequest | undefined {
+  const value = search.get('variant')
+  if (value === null || value === '') return undefined
+  if (screen === undefined || screen === '') return undefined
+  const index = value.lastIndexOf(':')
+  const group = index < 0 ? value : value.slice(0, index)
+  const branch = index < 0 ? '' : value.slice(index + 1)
+  return { screen, group, branch }
+}
+
 /** Normalize a decoded request path into safe segments. */
 function safeSegments(value: string): string[] | undefined {
   if (value.includes('\0')) return undefined
@@ -503,7 +514,17 @@ export function createRouteHandler(
           )
           return
         }
-        const body = JSON.stringify(buildPayload(session, runtime.currentRevision, registry.kitVersion, project))
+        const requestedScreen = url.searchParams.get('screen') ?? project.entry
+        const body = JSON.stringify(
+          buildPayload(
+            session,
+            runtime.currentRevision,
+            registry.kitVersion,
+            project,
+            undefined,
+            variantRequest(url.searchParams, requestedScreen ?? undefined),
+          ),
+        )
         send(res, 200, body, 'application/json; charset=utf-8', head)
         return
       }
@@ -584,9 +605,17 @@ export function createRouteHandler(
     try {
       if (url.searchParams.get('deterministic') === '1') {
         const assets = await collectDeterministicAssets(project)
+        const deterministicScreen = url.searchParams.get('screen') ?? screen ?? project.entry
         const document = await deterministicDocument(
           assetsDir,
-          buildPayload(session, runtime.currentRevision, registry.kitVersion, project, assets),
+          buildPayload(
+            session,
+            runtime.currentRevision,
+            registry.kitVersion,
+            project,
+            assets,
+            variantRequest(url.searchParams, deterministicScreen ?? undefined),
+          ),
         )
         send(res, 200, document.html, 'text/html; charset=utf-8', head, {
           'content-security-policy': document.csp,

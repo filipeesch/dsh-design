@@ -4,6 +4,77 @@ Checks run while implementing `add-design-journeys-and-checks` on top of the
 `add-design-foundation` baseline. Paths are portable placeholders; no owner
 token, real session id, temporary home, or machine-specific path is recorded.
 
+## Design variants (add-design-variants)
+
+Checks run on the packed bundle for this change, on top of baseline
+`6f7627d`. The disposable profile used a separate loopback port; the live GUI
+on 3080 and the DSH checkout were not modified. The repeatable procedure is in
+[`docs/review/variants-review.md`](review/variants-review.md).
+
+```sh
+pnpm run check
+openspec validate add-design-variants --strict
+pnpm run pack:bundle
+```
+
+Results:
+
+- `pnpm run check` exits 0: build, compile-time type tests, ESLint, Prettier,
+  EOF newline, and Vitest. Vitest reports 22 files and 289 tests passed,
+  including the full real Chromium preview suite and the comparison panes.
+- `openspec validate add-design-variants --strict` reports
+  `Change 'add-design-variants' is valid`.
+- `pnpm run pack:bundle` writes
+  `dist/filipeesch-dsh-design-bundle-0.1.0.tgz` (1,281,670 bytes; sha256
+  `903b3ec6f4137489f328a379e674260a93caf92025673e01ca6e5c3248bfa66d`).
+- The packed artifact was installed into a fresh disposable profile and booted
+  on a non-3080 loopback port with the synthetic variants workspace. The boot
+  log reported: one screen (`catalog`), group `layout` with chosen `compact`
+  and both branches valid; chosen and alternate `design_view` projections
+  distinct; `design_query` finding `checkout` in the spacious branch;
+  distinct branch-named screenshots under `design/.cache/screenshots`;
+  `design_diff` reporting the stable `checkout` parent move and the
+  `Continue` text change; and `design_status` still listing only `catalog`
+  while an ignored `design/.discarded/rejected.dsx` existed.
+- `docs/review/variants-check.mjs` reported `{"ok":true,"failures":[]}` with
+  evidence: 1280 and 390 CSS pixel canvases kept exactly in both panes, no
+  page-wide horizontal overflow, keyboard scrolling inside the 390-pixel
+  comparison region, clearing the shared starting state resetting both panes'
+  drawers and seeded values, a comment on the shared `open-filters` id pinned
+  only in the spacious pane and recorded `variant=layout:spacious` in the
+  session queue, malformed and unknown selections staying explicit, Back
+  restoring the previous comparison, one deterministic request with no comment
+  UI, and anonymous preview refused with 401.
+- `git check-ignore` reported `design/.gitignore:2:.discarded/` and
+  `design/.gitignore:1:.cache/`; the disposable workspace's Git status stayed
+  clean after the screenshots and comment checks.
+- Targeted regressions cover: subtree, whole-screen and nested group parsing
+  with source locations; malformed, empty, duplicate and missing-choice
+  diagnostics; ancestor selection and contradiction; wrapper removal and
+  address reindexing; shared ids in exclusive branches and duplicate ids in a
+  combined projection; fixture expansion in an alternate branch; branch-only
+  diagnostics not blocking the chosen render; last-valid variant document
+  retention; preview route parsing, diagnostics, comparison history, exact
+  widths, isolated fields/focus, and live reload; variant-aware status, view,
+  query, screenshot identity, and state incompatibility; semantic diff moves
+  versus insertion shifts, anonymous structural fallback, typed prop/text
+  changes, stable-branch and committed-revision modes, missing historic inputs,
+  committed config/tokens/screen diagnostics, duplicate committed screen ids,
+  direct-child source discovery, and unchanged worktree/index/branch;
+  ordinary-text promotion, ignored discard records, and cleanup that leaves
+  live sources intact. The targeted remediation regressions additionally cover
+  shared-selector reset after in-pane navigation and Back, local state preserved
+  through a compatible SSE refresh, last-valid comparison panes with diagnostic
+  overlays after invalid alternate edits, repaired panes mounting without a URL
+  change, whole-screen branch-local states, disjoint nested groups, canonical
+  comment identity across normal and explicit chosen views, and malformed or
+  unknown variant/comparison/state selections. The final follow-up covers
+  retained-only documents after structural failure: status reports every
+  retained branch stale, view/query/diff/screenshot fail with current
+  diagnostics instead of using retained data, and all recover after repair;
+  inactive nested defaults keep prior valid content with diagnostics and repair
+  cleanly.
+
 ## Design panel and review comments (add-design-panel-and-comments)
 
 Checks run on the packed bundle for this change. The disposable profile used a

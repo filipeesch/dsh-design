@@ -21,6 +21,7 @@ import type {
 import type {
   DesignChild,
   DesignElement,
+  DesignScreenNode,
   DesignProps,
   DesignPropValue,
   Diagnostic,
@@ -477,13 +478,20 @@ export function parseScreen(source: string, file: string): ParsedScreen {
   }
   const rootNode = parseElement(ctx, roots[0] as JSXElement, { path: [], label: '#' })
   if (rootNode === undefined) return { file, diagnostics: ctx.diagnostics }
+  if (rootNode.type === 'Variants') {
+    // A whole-screen variant group wraps one Screen per branch. Its structure
+    // is validated by the variant resolver before any kit rendering.
+    return { file, document: rootNode, diagnostics: ctx.diagnostics }
+  }
   if (rootNode.type !== 'Screen') {
     report(ctx, roots[0], 'missing-screen', `The root element must be <Screen>, not <${rootNode.type}>.`)
     return { file, diagnostics: ctx.diagnostics }
   }
+  const root: DesignScreenNode = { ...rootNode, type: 'Screen', id: rootNode.id ?? '' }
   return {
     file,
-    root: { ...rootNode, type: 'Screen', id: rootNode.id ?? '' },
+    root,
+    document: root,
     diagnostics: ctx.diagnostics,
   }
 }

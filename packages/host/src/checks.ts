@@ -19,6 +19,7 @@ import { KIT_VERSION } from '@filipeesch/dsh-design-kit/meta'
 import { BrowserSessions, DesignBrowserError, settleFrame } from './browser.ts'
 import { collectDeterministicAssets } from './deterministic.ts'
 import { buildPayload, type PreviewPayload } from './payload.ts'
+import { compatibleState, resolveScreenProjection, type ResolvedVariant } from './projection.ts'
 
 /** One measured semantic node, in CSS pixels relative to the canvas. */
 export interface LayoutNode {
@@ -95,6 +96,7 @@ export interface ScreenshotResult {
   readonly state?: string
   readonly breakpoint: string
   readonly highlight?: string
+  readonly variant?: ResolvedVariant
   readonly width: number
   readonly height: number
   readonly bytes: number
@@ -131,33 +133,39 @@ export function defaultBreakpoint(project: DesignProject): string {
   return ordered[0].name
 }
 
-/** One project screen with a renderable tree, or an explicit input error. */
-function requireScreen(project: DesignProject, id: string): ProjectScreen {
-  const screen = project.screens.find((candidate) => candidate.id === id)
-  if (screen === undefined || screen.id === '') throw new Error('Unknown screen "' + id + '".')
+/** One projection with a renderable tree, or an explicit input error. */
+function requireProjection(project: DesignProject, id: string, variant?: string) {
+  const projection = resolveScreenProjection(project, id, variant)
+  const screen = projection.screen
   if (screen.root === undefined) throw new Error('Screen "' + id + '" has no parsed tree; fix its diagnostics first.')
-  const first = screen.diagnostics.find((diagnostic) => diagnostic.severity === 'error')
-  if (first !== undefined) {
+  const blocking = screen.blockingErrors ?? countDiagnostics(screen.diagnostics).errors
+  if (blocking > 0) {
+    const first = screen.diagnostics.find((diagnostic) => diagnostic.severity === 'error')
     throw new Error(
       'Screen "' +
         id +
         '" has validation errors; fix them before a browser check. First error: ' +
-        first.file +
-        ':' +
-        String(first.line) +
-        ':' +
-        String(first.column) +
-        ' ' +
-        first.message,
+        (first === undefined
+          ? 'unknown'
+          : first.file + ':' + String(first.line) + ':' + String(first.column) + ' ' + first.message),
     )
   }
-  return screen
+  return projection
+}
+
+/** One project screen with a renderable chosen tree, or an explicit input error. */
+function requireScreen(project: DesignProject, id: string): ProjectScreen {
+  return requireProjection(project, id).screen
 }
 
 /** Build the immutable preview payload shared by preview and checks. */
-export async function payloadFor(project: DesignProject, session: string): Promise<PreviewPayload> {
+export async function payloadFor(
+  project: DesignProject,
+  session: string,
+  variant?: { screen: string; group: string; branch: string },
+): Promise<PreviewPayload> {
   const assets = await collectDeterministicAssets(project)
-  return buildPayload(session, 0, KIT_VERSION, project, assets)
+  return buildPayload(session, 0, KIT_VERSION, project, assets, variant)
 }
 
 interface RenderInput {
@@ -865,6 +873,7 @@ function screenshotName(
   named: NamedState | undefined,
   highlight: string | undefined,
   viewportHeight: number,
+  variant?: ResolvedVariant,
 ): string {
   const assets = Object.entries(payload.assets ?? {})
     .sort(([left], [right]) => left.localeCompare(right))
@@ -888,11 +897,13 @@ function screenshotName(
     stateTabs: named?.tabs ?? {},
     stateValues: named?.values ?? {},
     highlight: highlight ?? null,
+    variant: variant === undefined ? null : variant.path + '=' + variant.branch,
   })
   const hash = createHash('sha256').update(identity).digest('hex').slice(0, 12)
   const parts = [screen.id, breakpoint]
   if (named !== undefined) parts.push(named.name)
   if (highlight !== undefined) parts.push(highlight)
+  if (variant !== undefined) parts.push(variant.path.replaceAll('/', '-') + '-' + variant.branch)
   parts.push(hash)
   return parts.join('-') + '.png'
 }
@@ -956,22 +967,26 @@ export async function captureScreenshot(
   ctx: CheckContext,
   project: DesignProject,
   screenId: string,
-  options: { breakpoint?: string; state?: string; highlight?: string } = {},
+  options: { breakpoint?: string; state?: string; highlight?: string; variant?: string } = {},
 ): Promise<ScreenshotResult> {
-  const screen = requireScreen(project, screenId)
+  const projection = requireProjection(project, screenId, options.variant)
+  const screen = projection.screen
   const breakpoint = options.breakpoint ?? defaultBreakpoint(project)
   breakpointWidth(project, breakpoint)
-  if (options.state !== undefined && !findNamedState(screen.states, options.state)) {
-    throw new Error('Screen "' + screenId + '" does not declare state "' + options.state + '".')
-  }
+  const named = compatibleState(screen, screen.states, options.state)
   if (
     options.highlight !== undefined &&
     findNode(screen.root as NonNullable<typeof screen.root>, options.highlight) === undefined
   ) {
     throw new Error('Screen "' + screenId + '" has no node "' + options.highlight + '" to highlight.')
   }
-  const payload = await payloadFor(project, ctx.sessionId)
-  const named = findNamedState(screen.states, options.state)
+  const payload = await payloadFor(
+    project,
+    ctx.sessionId,
+    projection.variant === undefined
+      ? undefined
+      : { screen: screenId, group: projection.variant.path, branch: projection.variant.branch },
+  )
   const name = screenshotName(
     project,
     screen,
@@ -980,6 +995,7 @@ export async function captureScreenshot(
     named,
     options.highlight,
     ctx.browsers.viewportHeight,
+    projection.variant,
   )
   const directory = await screenshotDirectory(project.folder)
   const path = join(directory, name)
@@ -1028,6 +1044,7 @@ export async function captureScreenshot(
     ...(options.state === undefined ? {} : { state: options.state }),
     breakpoint,
     ...(options.highlight === undefined ? {} : { highlight: options.highlight }),
+    ...(projection.variant === undefined ? {} : { variant: projection.variant }),
     width: captured.box?.width ?? breakpointWidth(project, breakpoint),
     height: captured.box?.height ?? 0,
     bytes: buffer.length,

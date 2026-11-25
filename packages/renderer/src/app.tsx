@@ -1,20 +1,31 @@
 /** Preview application: chrome, frame, live reload, and interaction state. */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  canonicalVariantIdentity,
   collectCssRules,
   countDiagnostics,
   fingerprintDesignTree,
+  stateCompatibility,
   type Breakpoint,
   type DesignChild,
   type DesignElement,
   type DesignScreenNode,
   type Diagnostic,
 } from '@filipeesch/dsh-design-core'
-import { DesignEnvironmentContext, type DesignEnvironment } from '@filipeesch/dsh-design-kit'
+import { DesignEnvironmentContext, kitMetadata, type DesignEnvironment } from '@filipeesch/dsh-design-kit'
 import { fetchProject, subscribeRevisions } from './api.ts'
+import { CompareView } from './compare.tsx'
 import { renderNode } from './interpreter.tsx'
-import { getRoute, navigateRoute, selectBreakpoint, useRoute } from './route.ts'
-import { emptyState, filterState, loadState, saveState, seedState, type PreviewState } from './state.ts'
+import { buildRouteUrl, getRoute, navigateRoute, selectBreakpoint, useRoute } from './route.ts'
+import {
+  clearScreenState,
+  emptyState,
+  filterState,
+  loadState,
+  saveState,
+  seedState,
+  type PreviewState,
+} from './state.ts'
 import { ReviewOverlay } from './review.tsx'
 import type { ProjectPayload, WireScreen } from './wire.ts'
 
@@ -43,6 +54,12 @@ export function App() {
   const [ready, setReady] = useState(bootstrap !== undefined)
   const [frameElement, setFrameElement] = useState<HTMLDivElement | null>(null)
   const [barHost, setBarHost] = useState<HTMLDivElement | null>(null)
+  const malformedVariant = route.variantRaw !== undefined && route.variant === undefined
+  const malformedCompare = route.compareRaw !== undefined && route.compare === undefined
+  const variantParam = route.variant === undefined ? undefined : route.variant.group + ':' + route.variant.branch
+  // Only an explicit variant route needs its screen id; ordinary screen
+  // navigation keeps one project payload and one seeded state.
+  const variantScreen = variantParam === undefined ? undefined : route.screen
   const attachFrame = useCallback((node: HTMLDivElement | null) => {
     setFrameElement(node)
   }, [])
@@ -79,10 +96,13 @@ export function App() {
     setLoadError(undefined)
     setProject(undefined)
     lastTrees.current.clear()
-    fetchProject(session)
+    fetchProject(session, undefined, {
+      ...(variantScreen === undefined ? {} : { screen: variantScreen }),
+      ...(variantParam === undefined ? {} : { variant: variantParam }),
+    })
       .then((next) => {
         if (cancelled) return
-        setState(loadState(session))
+        setState(route.embed ? emptyState() : loadState(session))
         updateProject(next)
       })
       .catch((error: unknown) => {
@@ -91,22 +111,25 @@ export function App() {
     return () => {
       cancelled = true
     }
-  }, [session, updateProject, bootstrap])
+  }, [session, variantScreen, variantParam, route.embed, updateProject, bootstrap])
 
   useEffect(() => {
     if (route.deterministic) return
     return subscribeRevisions(session, (event) => {
       if (event.rev > revision.current) {
-        fetchProject(session, event.rev)
+        fetchProject(session, event.rev, {
+          ...(variantScreen === undefined ? {} : { screen: variantScreen }),
+          ...(variantParam === undefined ? {} : { variant: variantParam }),
+        })
           .then(updateProject)
           .catch(() => undefined)
       }
     })
-  }, [session, route.deterministic, updateProject])
+  }, [session, route.deterministic, variantScreen, variantParam, updateProject])
 
   useEffect(() => {
-    if (ready) saveState(session, state)
-  }, [session, state, ready])
+    if (ready && !route.embed) saveState(session, state)
+  }, [session, state, ready, route.embed])
 
   const available = project?.screens.filter((screen) => screen.id !== '') ?? []
   let entryId: string | undefined = available[0]?.id
@@ -128,32 +151,72 @@ export function App() {
     : (widest(breakpoints) ?? 'desktop')
   const breakpoint = breakpoints.find((candidate) => candidate.name === breakpointName)
 
-  const screenErrors = activeScreen === undefined ? 0 : countDiagnostics(activeScreen.diagnostics).errors
+  const screenErrors =
+    activeScreen === undefined ? 0 : (activeScreen.blockingErrors ?? countDiagnostics(activeScreen.diagnostics).errors)
   const projectFatal = project?.projectError !== undefined
+  const malformedVariantError =
+    malformedVariant && route.variantRaw !== undefined
+      ? 'The variant query "' + route.variantRaw + '" is not a group:branch selection.'
+      : undefined
+  const variantError =
+    route.variant === undefined ? malformedVariantError : (malformedVariantError ?? project?.variantError)
   const currentRoot = !projectFatal && screenErrors === 0 ? activeScreen?.root : undefined
   const retainedRoot =
-    activeScreen === undefined ? undefined : (activeScreen.lastValidRoot ?? lastTrees.current.get(activeScreen.id))
-  const tree = projectFatal || missingScreen ? undefined : (currentRoot ?? retainedRoot)
+    route.variant !== undefined
+      ? undefined
+      : activeScreen === undefined
+        ? undefined
+        : (activeScreen.lastValidRoot ?? lastTrees.current.get(activeScreen.id))
+  const tree = projectFatal || missingScreen || variantError !== undefined ? undefined : (currentRoot ?? retainedRoot)
   const treeFingerprint = useMemo(() => (tree === undefined ? undefined : fingerprintDesignTree(tree)), [tree])
   const screenStates = activeScreen?.states ?? []
   const unknownState = route.state !== undefined && !screenStates.some((candidate) => candidate.name === route.state)
+  const namedState = screenStates.find((candidate) => candidate.name === route.state)
+  const stateIssues =
+    route.variant !== undefined && namedState !== undefined && tree !== undefined
+      ? stateCompatibility(tree, namedState, kitMetadata)
+      : []
+  const incompatibleState =
+    stateIssues.length === 0
+      ? undefined
+      : 'State "' +
+        String(route.state) +
+        '" is incompatible with variant branch ' +
+        route.variant!.group +
+        ':' +
+        route.variant!.branch +
+        ': ' +
+        stateIssues.join('; ') +
+        '.'
   const appliedState =
-    route.state !== undefined && screenStates.some((candidate) => candidate.name === route.state)
-      ? route.state
-      : undefined
+    route.state !== undefined && namedState !== undefined && stateIssues.length === 0 ? route.state : undefined
 
-  // A named state seeds only on a screen/state route transition, never on a
-  // breakpoint change or a valid hot reload that leaves the route unchanged.
+  // A shared selector transition reseeds or clears that screen's starting
+  // view. A breakpoint change and a valid SSE reload leave the route key
+  // unchanged, so compatible local interaction survives.
   useEffect(() => {
     if (!ready || screenId === undefined) return
-    const key = screenId + '|' + (route.state ?? '')
+    const variantKey = route.variant === undefined ? '' : route.variant.group + ':' + route.variant.branch
+    const key = screenId + '|' + (route.state ?? '') + '|' + variantKey
     if (appliedSeed.current === key) return
+    const first = appliedSeed.current === undefined
     appliedSeed.current = key
-    if (route.state === undefined) return
     const named = screenStates.find((candidate) => candidate.name === route.state)
-    if (named === undefined) return
-    setState((current) => seedState(current, screenId, named))
-  }, [ready, screenId, route.state, screenStates])
+    const compatible =
+      named === undefined
+        ? false
+        : route.variant === undefined || tree === undefined
+          ? true
+          : stateCompatibility(tree, named, kitMetadata).length === 0
+    setState((current) => {
+      // Initial mount keeps compatible persisted interaction when the route
+      // carries no named state; later shared-selector changes reset it.
+      if (first && route.state === undefined) return current
+      const cleared = clearScreenState(current, screenId)
+      if (first) return named !== undefined && compatible ? seedState(current, screenId, named) : cleared
+      return named === undefined || !compatible ? cleared : seedState(cleared, screenId, named)
+    })
+  }, [ready, screenId, route.state, screenStates, route.variant, tree])
 
   const imageUrl = useCallback(
     (path: string) => {
@@ -293,61 +356,130 @@ export function App() {
   if (project === undefined || !ready) {
     return <div style={{ padding: 24, fontFamily: 'system-ui, sans-serif' }}>Loading preview…</div>
   }
+  if (malformedCompare && !route.deterministic) {
+    return (
+      <div className="dsx-compare dsx-compare-empty" role="alert">
+        <strong>Malformed comparison selection</strong>
+        <p>
+          The comparison query "{route.compareRaw}" is not a group:left:right selection. No branch or screen is
+          substituted.
+        </p>
+        <a href={buildRouteUrl(project.config.entry ?? route.screen, { breakpoint: route.breakpoint })}>
+          Open the chosen screen
+        </a>
+      </div>
+    )
+  }
+  if (route.compare !== undefined && !route.deterministic) return <CompareView route={route} project={project} />
+  const deterministicCompare = route.deterministic && (route.compare !== undefined || route.compareRaw !== undefined)
 
   const frame = breakpoint === undefined ? undefined : breakpoint
+  const variantIdentity = canonicalVariantIdentity(activeScreen?.effectiveSelection ?? {})
   return (
     <div
-      className={'dsx-shell' + (route.deterministic ? ' dsx-deterministic' : '')}
+      className={'dsx-shell' + (route.deterministic ? ' dsx-deterministic' : '') + (route.embed ? ' dsx-embed' : '')}
       data-dsx-session={session}
       data-dsx-deterministic={route.deterministic ? '1' : undefined}
       data-dsx-clock={route.deterministic ? String(FIXED_TIME) : undefined}
       data-dsx-state={route.state}
-      data-dsx-state-error={unknownState ? '1' : undefined}
+      data-dsx-state-error={unknownState || incompatibleState !== undefined ? '1' : undefined}
+      data-dsx-variant={variantIdentity}
+      data-dsx-variant-chosen={activeScreen?.variant?.chosen === true ? '1' : undefined}
+      data-dsx-embed={route.embed ? '1' : undefined}
     >
-      <header className="dsx-chrome">
-        <div className="dsx-brand">Design preview</div>
-        <nav aria-label="Screens" className="dsx-screens">
-          {available.map((screen) => (
-            <button
-              key={screen.id}
-              type="button"
-              className={screen.id === screenId ? 'active' : ''}
-              onClick={() => navigateRoute(screen.id, breakpointName)}
-            >
-              <span>{screen.id}</span>
-              {screen.errors > 0 ? <span className="dsx-badge error">{screen.errors}</span> : null}
-              {screen.errors === 0 && screen.warnings > 0 ? (
-                <span className="dsx-badge warning">{screen.warnings}</span>
-              ) : null}
-            </button>
-          ))}
-        </nav>
-        <div className="dsx-breakpoints" role="group" aria-label="Breakpoints">
-          {breakpoints.map((candidate) => (
-            <button
-              key={candidate.name}
-              type="button"
-              className={candidate.name === breakpointName ? 'active' : ''}
-              onClick={() => selectBreakpoint(candidate.name)}
-            >
-              {candidate.name}
-              <small>{candidate.width}px</small>
-            </button>
-          ))}
+      {route.embed ? (
+        <div className="dsx-embed-bar">
+          {activeScreen?.variant === undefined ? null : (
+            <span className="dsx-variant-badge" data-dsx-variant-badge>
+              {activeScreen.variant.path} · {activeScreen.variant.branch}
+              {activeScreen.variant.chosen ? ' (chosen)' : ' (alternative)'}
+            </span>
+          )}
+          <div className="dsx-review-slot" ref={attachBar} />
+          <span className="dsx-meta">kit {project.kitVersion}</span>
         </div>
-        <div className="dsx-review-slot" ref={attachBar} />
-        <div className="dsx-meta">
-          <span>kit {project.kitVersion}</span>
-          <span>rev {project.revision}</span>
-          {route.deterministic ? <span>deterministic</span> : null}
-        </div>
-      </header>
+      ) : (
+        <header className="dsx-chrome">
+          <div className="dsx-brand">Design preview</div>
+          <nav aria-label="Screens" className="dsx-screens">
+            {available.map((screen) => (
+              <button
+                key={screen.id}
+                type="button"
+                className={screen.id === screenId ? 'active' : ''}
+                onClick={() => navigateRoute(screen.id, breakpointName)}
+              >
+                <span>{screen.id}</span>
+                {screen.errors > 0 ? <span className="dsx-badge error">{screen.errors}</span> : null}
+                {screen.errors === 0 && screen.warnings > 0 ? (
+                  <span className="dsx-badge warning">{screen.warnings}</span>
+                ) : null}
+              </button>
+            ))}
+          </nav>
+          <div className="dsx-breakpoints" role="group" aria-label="Breakpoints">
+            {breakpoints.map((candidate) => (
+              <button
+                key={candidate.name}
+                type="button"
+                className={candidate.name === breakpointName ? 'active' : ''}
+                onClick={() => selectBreakpoint(candidate.name)}
+              >
+                {candidate.name}
+                <small>{candidate.width}px</small>
+              </button>
+            ))}
+          </div>
+          {activeScreen?.variant === undefined ? null : (
+            <span className="dsx-variant-badge" data-dsx-variant-badge>
+              {activeScreen.variant.path} · {activeScreen.variant.branch}
+              {activeScreen.variant.chosen ? ' (chosen)' : ' (alternative)'}
+            </span>
+          )}
+          <div className="dsx-review-slot" ref={attachBar} />
+          <div className="dsx-meta">
+            <span>kit {project.kitVersion}</span>
+            <span>rev {project.revision}</span>
+            {route.deterministic ? <span>deterministic</span> : null}
+          </div>
+        </header>
+      )}
       <main className="dsx-stage">
         {unknownState ? (
           <div className="dsx-notice error" role="alert">
             <strong>Unknown state</strong>
             <p>
               State "{route.state}" is not declared for screen "{screenId ?? ''}". No state was applied.
+            </p>
+          </div>
+        ) : null}
+        {incompatibleState === undefined ? null : (
+          <div className="dsx-notice error" role="alert">
+            <strong>Incompatible state for this branch</strong>
+            <p>{incompatibleState} No state was applied.</p>
+          </div>
+        )}
+        {variantError === undefined ? null : (
+          <div className="dsx-notice error" role="alert">
+            <strong>Unknown variant selection</strong>
+            <p>{variantError}</p>
+            {activeScreen?.variants === undefined || activeScreen.variants.length === 0 ? null : (
+              <ul>
+                {activeScreen.variants.map((group) => (
+                  <li key={group.path}>
+                    {group.path} (chosen {group.chosen}): {group.branches.map((branch) => branch.id).join(', ')}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+        {deterministicCompare ? (
+          <div className="dsx-notice" role="status">
+            <strong>Deterministic preview</strong>
+            <p>
+              This self-contained canvas renders the chosen projection only; open the interactive comparison route to
+              compare branches.
             </p>
           </div>
         ) : null}
@@ -364,8 +496,12 @@ export function App() {
         ) : null}
         {frame === undefined || tree === undefined ? (
           <div className="dsx-notice error" role="alert">
-            <strong>No renderable screen</strong>
-            <p>Fix the errors below and save the file. The last valid render is kept while it exists.</p>
+            <strong>{variantError === undefined ? 'No renderable screen' : 'Variant unavailable'}</strong>
+            <p>
+              {variantError === undefined
+                ? 'Fix the errors below and save the file. The last valid render is kept while it exists.'
+                : 'The requested branch is not rendered. The chosen branch is not substituted automatically.'}
+            </p>
             <ul>
               {overlayErrors.slice(0, 10).map((diagnostic, index) => (
                 <li key={index}>
@@ -446,6 +582,7 @@ export function App() {
           revision={project.revision}
           breakpoint={breakpointName}
           {...(appliedState === undefined ? {} : { state: appliedState })}
+          {...(variantIdentity === undefined ? {} : { variant: variantIdentity })}
           overlays={overlayList}
           tabs={tabSelections}
           frame={frameElement}

@@ -29,6 +29,11 @@ describe('design prompt', () => {
     expect(prompt).toContain('not versioned')
     expect(prompt).toContain('rather than applying a comment to a different component')
     expect(prompt).toContain('Screen, Stack')
+    expect(prompt).toContain('<Variants id="layout" chosen="compact">')
+    expect(prompt).toContain('?compare=layout:compact:spacious')
+    expect(prompt).toContain('design_diff')
+    expect(prompt).toContain('design/.discarded/')
+    expect(prompt).toContain('choice change alone promotes nothing')
   })
 
   it('keeps checks opt-in and fixtures fictitious', () => {

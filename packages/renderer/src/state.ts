@@ -92,3 +92,17 @@ export function seedState(state: PreviewState, screen: string, named: NamedState
   for (const [id, value] of Object.entries(named.values)) values[prefix + id] = value
   return { openOverlays, tabs, values }
 }
+/** Clear only one screen's interaction state, preserving other screens. */
+export function clearScreenState(state: PreviewState, screen: string): PreviewState {
+  const prefix = screen + '/'
+  const strip = <T>(record: Record<string, T>): Record<string, T> => {
+    const next: Record<string, T> = {}
+    for (const [key, value] of Object.entries(record)) if (!key.startsWith(prefix)) next[key] = value
+    return next
+  }
+  return {
+    openOverlays: strip(state.openOverlays),
+    tabs: strip(state.tabs),
+    values: strip(state.values),
+  }
+}

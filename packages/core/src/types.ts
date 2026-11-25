@@ -103,7 +103,10 @@ export type DesignChild = DesignElement | DesignText
 /** A parsed screen file. */
 export interface ParsedScreen {
   readonly file: string
+  /** Resolved root when the file is an ordinary Screen. */
   readonly root?: DesignScreenNode
+  /** Raw root document, which may be a whole-screen Variants wrapper. */
+  readonly document?: DesignScreenNode | DesignElement
   readonly diagnostics: readonly Diagnostic[]
 }
 
@@ -125,6 +128,10 @@ export interface Diagnostic {
   readonly address?: string
   /** Suggested correction, when the validator can compute one. */
   readonly suggestion?: string
+  /** Variant group path when the diagnostic belongs to one group's projection. */
+  readonly group?: string
+  /** Variant branch id when the diagnostic belongs to one branch projection. */
+  readonly branch?: string
 }
 
 /** One design token after alias expansion. */
@@ -162,6 +169,45 @@ export interface DesignConfig {
   readonly entry?: string
 }
 
+/** One branch of a variant group, with its validated projection state. */
+export interface VariantBranchInfo {
+  readonly id: string
+  readonly source: SourceLocation
+  /** Whether the projection choosing this branch validates without errors. */
+  readonly valid: boolean
+  /** True when a previous valid snapshot is kept after an invalid edit. */
+  readonly stale?: boolean
+  /** Branch-local Screen states for a whole-screen alternative. */
+  readonly states?: readonly NamedState[]
+  /** Diagnostics produced by this branch's own projection. */
+  readonly diagnostics: readonly Diagnostic[]
+}
+
+/** Last valid expanded inputs for one branch projection. */
+export interface VariantProjectionSnapshot {
+  /** Expanded tree with the Screen states prop stripped. */
+  readonly root: DesignScreenNode
+  /** Named states validated against this projection. */
+  readonly states: readonly NamedState[]
+  /** Effective selection used to resolve this snapshot. */
+  readonly selection: Readonly<Record<string, string>>
+  /** Fixture collections used to expand this snapshot. */
+  readonly fixtures: FixtureCollections
+}
+
+/** One validated variant group discovered in a screen source. */
+export interface VariantGroupInfo {
+  readonly id: string
+  /** Screen-local group path used in routes and selections. */
+  readonly path: string
+  readonly chosen: string
+  readonly source: SourceLocation
+  readonly parentPath?: string
+  readonly parentBranch?: string
+  readonly wholeScreen: boolean
+  readonly branches: readonly VariantBranchInfo[]
+}
+
 /** One screen in a loaded project. */
 export interface ProjectScreen {
   readonly id: string
@@ -173,6 +219,22 @@ export interface ProjectScreen {
   readonly lastValidRoot?: DesignScreenNode
   /** Validated named states belonging to the current (or last valid) tree. */
   readonly states: readonly NamedState[]
+  /** Validated groups, including branch projection diagnostics. */
+  readonly variants?: readonly VariantGroupInfo[]
+  /** Raw document (current when structurally valid, otherwise last valid). */
+  readonly variantDocument?: DesignScreenNode | DesignElement
+  /** Fixtures paired with variantDocument; never mix old source with new fixtures. */
+  readonly variantFixtures?: FixtureCollections
+  /** Last valid expanded snapshot per group/branch, keyed by path|branch. */
+  readonly variantSnapshots?: Readonly<Record<string, VariantProjectionSnapshot>>
+  /** True when the variant document/snapshots come from a previous valid load. */
+  readonly variantStale?: boolean
+  /** Whether variantDocument is the current source (false when retained). */
+  readonly variantDocumentCurrent?: boolean
+  /** Effective chosen-branch selection for this screen. */
+  readonly chosenSelection?: Readonly<Record<string, string>>
+  /** Errors that block the chosen projection; branch-only errors do not. */
+  readonly blockingErrors?: number
 }
 
 /** One value assignable by a named screen state. */

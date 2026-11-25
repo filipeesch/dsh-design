@@ -32,6 +32,8 @@ export interface ReviewOverlayProps {
   readonly revision: number
   readonly breakpoint: string
   readonly state?: string
+  /** Effective variant identity, for example `layout:spacious`. */
+  readonly variant?: string
   readonly overlays: readonly string[]
   readonly tabs: Readonly<Record<string, string>>
   readonly frame: HTMLDivElement | null
@@ -53,7 +55,7 @@ type Composer =
 /** How one stored draft relates to the currently rendered screen. */
 export type DraftViewStatus =
   | { readonly kind: 'anchored'; readonly element: HTMLElement }
-  | { readonly kind: 'context'; readonly reason: 'screen' | 'state' | 'content' }
+  | { readonly kind: 'context'; readonly reason: 'screen' | 'state' | 'variant' | 'content' }
   | { readonly kind: 'unresolved' }
 
 type Status = { readonly kind: 'success' | 'error' | 'info'; readonly message: string }
@@ -138,10 +140,12 @@ function isRendered(node: HTMLElement): boolean {
 export function resolveDraftStatus(
   draft: CommentDraft,
   root: ParentNode | null,
-  view: { readonly screen: string; readonly state?: string; readonly fingerprint?: string },
+  view: { readonly screen: string; readonly state?: string; readonly variant?: string; readonly fingerprint?: string },
 ): DraftViewStatus {
   if (draft.context.screen !== view.screen) return { kind: 'context', reason: 'screen' }
   if ((draft.context.state ?? undefined) !== (view.state ?? undefined)) return { kind: 'context', reason: 'state' }
+  if ((draft.context.variant ?? undefined) !== (view.variant ?? undefined))
+    return { kind: 'context', reason: 'variant' }
   if (
     draft.anchor.kind === 'structural' &&
     (draft.anchor.fingerprint === undefined || draft.anchor.fingerprint !== view.fingerprint)
@@ -175,6 +179,7 @@ function contextOf(props: ReviewOverlayProps): CommentContext {
     screen: props.screen,
     breakpoint: props.breakpoint,
     ...(props.state === undefined ? {} : { state: props.state }),
+    ...(props.variant === undefined ? {} : { variant: props.variant }),
     overlays: [...props.overlays].sort((left, right) => left.localeCompare(right)),
     tabs,
   }
@@ -183,6 +188,7 @@ function contextOf(props: ReviewOverlayProps): CommentContext {
 function contextSummary(context: CommentContext): string {
   const parts = [context.screen, context.breakpoint]
   if (context.state !== undefined) parts.push('state ' + context.state)
+  if (context.variant !== undefined) parts.push('variant ' + context.variant)
   if (context.overlays.length > 0) parts.push('overlays ' + context.overlays.join(', '))
   const tabs = Object.entries(context.tabs)
   if (tabs.length > 0) parts.push('tabs ' + tabs.map(([key, value]) => key + '=' + value).join(', '))
@@ -191,7 +197,7 @@ function contextSummary(context: CommentContext): string {
 
 /** Draw and manage the review surface inside an interactive preview. */
 export function ReviewOverlay(props: ReviewOverlayProps): ReactNode {
-  const { session, frame, revision, screen, breakpoint, state, fingerprint, barHost = null } = props
+  const { session, frame, revision, screen, breakpoint, state, variant, fingerprint, barHost = null } = props
   const [snapshot, setSnapshot] = useState<CommentSnapshot | undefined>(undefined)
   const [loadError, setLoadError] = useState<string | undefined>(undefined)
   const [mode, setMode] = useState(false)
@@ -219,10 +225,10 @@ export function ReviewOverlay(props: ReviewOverlayProps): ReactNode {
     const inner = frame?.querySelector<HTMLElement>('.dsx-frame-inner') ?? null
     const map = new Map<string, DraftViewStatus>()
     for (const draft of drafts) {
-      map.set(draft.id, resolveDraftStatus(draft, inner, { screen, state, fingerprint }))
+      map.set(draft.id, resolveDraftStatus(draft, inner, { screen, state, variant, fingerprint }))
     }
     return map
-  }, [drafts, frame, screen, state, fingerprint, breakpoint])
+  }, [drafts, frame, screen, state, variant, fingerprint, breakpoint])
 
   const refresh = useCallback(
     async (signal?: AbortSignal): Promise<void> => {
@@ -460,7 +466,7 @@ export function ReviewOverlay(props: ReviewOverlayProps): ReactNode {
       const frameRect = frame.getBoundingClientRect()
       const inner = frame.querySelector<HTMLElement>('.dsx-frame-inner') ?? frame
       const next: PinPosition[] = []
-      const view = { screen, state, fingerprint }
+      const view = { screen, state, variant, fingerprint }
       drafts.forEach((draft, index) => {
         const resolution = resolveDraftStatus(draft, inner, view)
         if (resolution.kind !== 'anchored') return
@@ -483,7 +489,7 @@ export function ReviewOverlay(props: ReviewOverlayProps): ReactNode {
       window.removeEventListener('resize', compute)
       document.removeEventListener('scroll', compute, true)
     }
-  }, [frame, drafts, revision, screen, state, fingerprint, breakpoint])
+  }, [frame, drafts, revision, screen, state, variant, fingerprint, breakpoint])
 
   const save = async (): Promise<void> => {
     if (composer === undefined || busy) return
@@ -568,7 +574,9 @@ export function ReviewOverlay(props: ReviewOverlayProps): ReactNode {
           ? 'different screen'
           : status.reason === 'state'
             ? 'different state'
-            : 'content changed',
+            : status.reason === 'variant'
+              ? 'different variant'
+              : 'content changed',
       className: 'dsx-review-context-mismatch',
     }
   }
@@ -756,6 +764,9 @@ export function ReviewOverlay(props: ReviewOverlayProps): ReactNode {
               />
               <div className="dsx-review-context">
                 Screen {screen} · {breakpoint}
+                {composer.kind === 'new' && composer.context.variant !== undefined
+                  ? ' · variant ' + composer.context.variant
+                  : ''}
               </div>
               <div className="dsx-review-actions">
                 <button type="button" className="dsx-review-save" onClick={() => void save()} disabled={busy}>

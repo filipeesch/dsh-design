@@ -192,7 +192,7 @@ export async function scaffoldProject(
       content: JSON.stringify(DEFAULT_TOKENS, null, 2) + '\n',
     },
     { path: 'screens/home.dsx', content: SAMPLE_SCREEN },
-    { path: '.gitignore', content: '.cache/\n' },
+    { path: '.gitignore', content: '.cache/\n.discarded/\n' },
   ]
   const created: string[] = []
   const existing: string[] = []

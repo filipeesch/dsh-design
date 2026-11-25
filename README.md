@@ -5,8 +5,8 @@ clickable, responsive web app in a restricted JSX-style DSL, preview it live in
 the browser, and iterate with validation feedback attached to every edit.
 
 This repository implements the `add-design-foundation`,
-`add-design-journeys-and-checks`, and `add-design-panel-and-comments` OpenSpec
-changes. The plugin is developed here, outside the DSH source tree, and
+`add-design-journeys-and-checks`, `add-design-panel-and-comments`, and
+`add-design-variants` OpenSpec changes. The plugin is developed here, outside the DSH source tree, and
 installed into a DSH profile with `dsh plugin`.
 
 ## Requirements
@@ -51,7 +51,8 @@ profile to see the source checkout. Restart DSH after installing. The profile
 then lists the **Design** agent preset, and the preview route answers under
 `/design/<session-id>/` on the DSH web server. Opening a design session gives the agent `design_init`, `design_status`,
 `design_validate`, `design_view` (including measured layout), `design_catalog`,
-`design_run_journey`, `design_lint`, `design_screenshot`, and `design_query`.
+`design_run_journey`, `design_lint`, `design_screenshot`, `design_query`, and
+`design_diff`.
 
 A session whose working directory contains `design/design.json` gets a live
 preview. The agent shares the URL from `design_status`; open it in a normal
@@ -96,6 +97,42 @@ Design files in a target repository are versioned sources: `design/design.json`,
 `design/fixtures/*.json`, and optional `design/journeys/*.dsx`. Derived files
 (including screenshots) belong only in `design/.cache/`, which the scaffolded
 `.gitignore` excludes.
+
+## Variants
+
+A screen can hold mutually exclusive alternatives. The normal preview, journeys,
+checks, and handoff always use the chosen branch; exploring an alternative never
+changes the source.
+
+```jsx
+<Variants id="layout" chosen="compact">
+  <Variant branch="compact">
+    <Stack gap="spacing.sm">...</Stack>
+  </Variant>
+  <Variant branch="spacious">
+    <Stack gap="spacing.lg">...</Stack>
+  </Variant>
+</Variants>
+```
+
+A whole-screen group at the file root wraps one `<Screen>` per branch with the
+same id. Stable node ids may repeat across exclusive branches. Every branch is
+validated, and wrappers never render.
+
+- `/design/<session>/<screen>?variant=layout:spacious` opens one branch.
+- `/design/<session>/<screen>?compare=layout:compact:spacious` keeps both
+  branches side by side at the same breakpoint and state. Panes are isolated and
+  scroll internally on narrow hosts.
+- `design_view`, `design_query`, and `design_screenshot` accept
+  `variant: "group:branch"`; screenshots for different branches never overwrite
+  each other.
+- `design_diff` compares two branches or the chosen projection at two local Git
+  revisions without checking out or writing anything.
+
+Promotion is an ordinary source edit: record rejected branches under
+`design/.discarded/`, replace the `<Variants>` block with the winning children,
+and validate. Clean that folder only when the owner explicitly asks. See
+[`docs/variants-workflow.md`](docs/variants-workflow.md).
 
 ## Named states, fixtures, and journeys
 

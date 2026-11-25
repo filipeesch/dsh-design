@@ -15,9 +15,18 @@ import { parseJourney, validateJourney } from './journey.ts'
 import type { KitMetadata } from './metadata.ts'
 import { parseScreen } from './parse.ts'
 import { extractNamedStates } from './state.ts'
-import { validateTree } from './validate.ts'
+import { validateTree, type ValidationContext } from './validate.ts'
 import { parseTokens } from './tokens.ts'
+import {
+  collectVariantGroups,
+  enumerateVariantSelections,
+  MAX_VARIANT_PROJECTIONS,
+  resolveVariantDocument,
+  variantSelectionKey,
+  type DiscoveredVariantGroup,
+} from './variants.ts'
 import type {
+  DesignElement,
   DesignProject,
   DesignScreenNode,
   Diagnostic,
@@ -26,6 +35,9 @@ import type {
   ParsedScreen,
   ProjectJourney,
   ProjectScreen,
+  VariantBranchInfo,
+  VariantGroupInfo,
+  VariantProjectionSnapshot,
 } from './types.ts'
 
 /** Default design folder name inside the session working directory. */
@@ -129,27 +141,251 @@ function emptyProject(folder: string, diagnostics: Diagnostic[]): DesignProject 
   }
 }
 
-/** Screen data after fixture expansion and state extraction. */
+/** Screen data after variant resolution, fixture expansion, and state extraction. */
 interface PreparedScreen {
   readonly parsed: ParsedScreen
+  readonly document?: DesignScreenNode | DesignElement
   readonly root?: DesignScreenNode
   readonly states: readonly NamedState[]
+  readonly selection: Readonly<Record<string, string>>
   readonly diagnostics: readonly Diagnostic[]
+  /** Whether the chosen projection resolved structurally. */
+  readonly structural: boolean
 }
 
-/** Expand one parsed screen, extract its named states, and collect diagnostics. */
+/** Resolve the chosen projection, expand fixtures, and extract named states. */
 function prepareScreen(parsed: ParsedScreen, fixtures: DesignProject['fixtures'], kit: KitMetadata): PreparedScreen {
-  if (parsed.root === undefined) {
-    return { parsed, states: [], diagnostics: parsed.diagnostics }
+  const document = parsed.document ?? parsed.root
+  if (document === undefined) {
+    return { parsed, states: [], selection: {}, diagnostics: parsed.diagnostics, structural: false }
   }
-  const expanded = expandScreen(parsed.root, fixtures, parsed.file)
+  const discovery = collectVariantGroups(document)
+  const chosen = resolveVariantDocument(document, {})
+  const diagnostics: Diagnostic[] = [...parsed.diagnostics, ...discovery.diagnostics, ...chosen.diagnostics]
+  if (chosen.screen === undefined) {
+    return {
+      parsed,
+      document,
+      states: [],
+      selection: chosen.selection,
+      diagnostics,
+      structural: false,
+    }
+  }
+  const expanded = expandScreen(chosen.screen, fixtures, parsed.file)
   const states = extractNamedStates(expanded.root, parsed.file, kit)
   return {
     parsed,
+    document,
     root: states.root,
     states: states.states,
-    diagnostics: [...parsed.diagnostics, ...expanded.diagnostics, ...states.diagnostics],
+    selection: chosen.selection,
+    diagnostics: [...diagnostics, ...expanded.diagnostics, ...states.diagnostics],
+    structural: true,
   }
+}
+
+/** Tag a projection diagnostic with the group and branch it belongs to. */
+function tagDiagnostic(
+  diagnostic: Diagnostic,
+  group: DiscoveredVariantGroup,
+  branch: string,
+  prefix?: string,
+): Diagnostic {
+  return {
+    ...diagnostic,
+    ...(diagnostic.group === undefined ? { group: group.path } : {}),
+    ...(diagnostic.branch === undefined ? { branch } : {}),
+    ...(prefix === undefined || !diagnostic.severity ? {} : { message: prefix + diagnostic.message }),
+  }
+}
+
+/** Stable diagnostic identity used to drop repeats across projections. */
+function diagnosticKey(diagnostic: Diagnostic): string {
+  return [
+    diagnostic.code,
+    diagnostic.file,
+    String(diagnostic.line),
+    String(diagnostic.column),
+    diagnostic.message,
+    diagnostic.group ?? '',
+    diagnostic.branch ?? '',
+  ].join('|')
+}
+
+function dedupe(diagnostics: readonly Diagnostic[]): Diagnostic[] {
+  const seen = new Set<string>()
+  const result: Diagnostic[] = []
+  for (const diagnostic of diagnostics) {
+    const key = diagnosticKey(diagnostic)
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(diagnostic)
+  }
+  return result
+}
+
+interface VariantValidation {
+  readonly groups: readonly VariantGroupInfo[]
+  /** Diagnostics for alternate branches and multi-branch combinations. */
+  readonly extras: readonly Diagnostic[]
+  /** Last valid expanded snapshot per group/branch key. */
+  readonly snapshots: Readonly<Record<string, VariantProjectionSnapshot>>
+  /** Blocking projection-budget diagnostic, when enumeration exceeded it. */
+  readonly limit?: Diagnostic
+}
+
+/**
+ * Validate every reachable bounded projection of one screen. The chosen
+ * projection is validated separately; this function covers each alternate
+ * branch and every multi-branch combination.
+ */
+function validateVariantProjections(input: {
+  readonly document: DesignScreenNode | DesignElement
+  readonly file: string
+  readonly context: ValidationContext
+  readonly fixtures: DesignProject['fixtures']
+  readonly chosenSelection: Readonly<Record<string, string>>
+  readonly chosenErrors: number
+  readonly chosenRoot?: DesignScreenNode
+  readonly chosenStates: readonly NamedState[]
+  readonly wholeScreen: boolean
+}): VariantValidation {
+  const discovery = collectVariantGroups(input.document)
+  if (discovery.groups.length === 0) return { groups: [], extras: [], snapshots: {} }
+  const extras: Diagnostic[] = []
+  const groups: VariantGroupInfo[] = []
+  const snapshots: Record<string, VariantProjectionSnapshot> = {}
+  const baseline = resolveVariantDocument(input.document, {})
+  const baselineSelection: Record<string, string> = {}
+  for (const [path, branch] of Object.entries(baseline.selection)) baselineSelection[path] = branch
+  for (const [path, branch] of Object.entries(input.chosenSelection)) baselineSelection[path] = branch
+
+  for (const group of discovery.groups) {
+    const branches: VariantBranchInfo[] = []
+    for (const branch of group.branches) {
+      const activeChosen = branch.id === group.chosen && input.chosenSelection[group.path] === branch.id
+      if (activeChosen) {
+        if (input.chosenErrors === 0 && input.chosenRoot !== undefined) {
+          snapshots[group.path + '|' + branch.id] = {
+            root: input.chosenRoot,
+            states: input.chosenStates,
+            selection: input.chosenSelection,
+            fixtures: input.fixtures,
+          }
+        }
+        branches.push({
+          id: branch.id,
+          source: branch.source,
+          valid: input.chosenErrors === 0,
+          ...(input.wholeScreen ? { states: input.chosenStates } : {}),
+          diagnostics: [],
+        })
+        continue
+      }
+      // Use the same group:branch request the preview and tools use: the
+      // resolver chooses only required ancestors and keeps every other
+      // reachable group on its implicit chosen branch. Carrying the chosen
+      // projection's sibling selections would make disjoint nested branches
+      // look unreachable.
+      const selection: Record<string, string> = { [group.path]: branch.id }
+      const projection = resolveVariantDocument(input.document, selection)
+      let diagnostics: Diagnostic[] = [...projection.diagnostics]
+      let snapshotStates: readonly NamedState[] = input.chosenStates
+      let expandedRoot: DesignScreenNode | undefined
+      if (projection.screen !== undefined) {
+        const expanded = expandScreen(projection.screen, input.fixtures, input.file)
+        const states = extractNamedStates(expanded.root, input.file, input.context.kit)
+        const semantic = validateTree(states.root, input.file, input.context)
+        // Shared Screen states are validated against the chosen projection; a
+        // missing branch-local target is diagnosed at selection time. A
+        // whole-screen branch owns its Screen states and is validated here.
+        diagnostics = [
+          ...projection.diagnostics,
+          ...expanded.diagnostics,
+          ...(input.wholeScreen ? states.diagnostics : []),
+          ...semantic,
+        ]
+        expandedRoot = states.root
+        snapshotStates = input.wholeScreen ? states.states : input.chosenStates
+      }
+      const prefix = 'Variant group #' + group.id + ' branch "' + branch.id + '": '
+      const tagged = dedupe(diagnostics.map((entry) => tagDiagnostic(entry, group, branch.id, prefix)))
+      const errors = countDiagnostics(tagged).errors
+      const valid = projection.screen !== undefined && errors === 0
+      if (valid && expandedRoot !== undefined) {
+        snapshots[group.path + '|' + branch.id] = {
+          root: expandedRoot,
+          states: snapshotStates,
+          selection: projection.selection,
+          fixtures: input.fixtures,
+        }
+      }
+      branches.push({
+        id: branch.id,
+        source: branch.source,
+        valid,
+        ...(input.wholeScreen ? { states: snapshotStates } : {}),
+        diagnostics: tagged,
+      })
+      extras.push(...tagged)
+    }
+    groups.push({
+      id: group.id,
+      path: group.path,
+      chosen: group.chosen,
+      source: group.source,
+      ...(group.parentPath === undefined ? {} : { parentPath: group.parentPath }),
+      ...(group.parentBranch === undefined ? {} : { parentBranch: group.parentBranch }),
+      wholeScreen: group.wholeScreen,
+      branches,
+    })
+  }
+
+  const enumerated = enumerateVariantSelections(input.document, MAX_VARIANT_PROJECTIONS + 1)
+  if (enumerated.selections.length > MAX_VARIANT_PROJECTIONS || enumerated.truncated) {
+    const first = discovery.groups[0]!
+    const limit: Diagnostic = {
+      severity: 'error',
+      code: 'variant-projection-limit',
+      file: input.file,
+      line: first.source.line,
+      column: first.source.column,
+      group: first.path,
+      message:
+        'This screen reaches more than ' +
+        String(enumerated.selections.length) +
+        ' variant projections; reduce the groups or branches so every published alternative can be validated.',
+      suggestion: 'Keep each screen within the documented projection budget.',
+    }
+    return { groups, extras: dedupe(extras), snapshots, limit }
+  }
+  for (const selection of enumerated.selections) {
+    const diffs = Object.entries(selection).filter(([path, branch]) => baselineSelection[path] !== branch)
+    if (diffs.length < 2) continue
+    const projection = resolveVariantDocument(input.document, selection)
+    const first = discovery.groups.find((group) => group.path === diffs[0]![0])
+    if (first === undefined) continue
+    const branchId = diffs[0]![1]
+    const prefix = 'Variant combination ' + variantSelectionKey(selection).split('|').join(', ') + ' is invalid: '
+    const diagnostics =
+      projection.screen === undefined
+        ? [...projection.diagnostics]
+        : (() => {
+            const expanded = expandScreen(projection.screen, input.fixtures, input.file)
+            const states = extractNamedStates(expanded.root, input.file, input.context.kit)
+            const semantic = validateTree(states.root, input.file, input.context)
+            return [
+              ...projection.diagnostics,
+              ...expanded.diagnostics,
+              ...(input.wholeScreen ? states.diagnostics : []),
+              ...semantic,
+            ]
+          })()
+    const tagged = dedupe(diagnostics.map((entry) => tagDiagnostic(entry, first, branchId, prefix)))
+    extras.push(...tagged)
+  }
+  return { groups, extras: dedupe(extras), snapshots }
 }
 
 /** Duplicate journey ids across files, reported on the later file. */
@@ -277,6 +513,7 @@ export async function loadProject(options: LoadProjectOptions): Promise<DesignPr
   const configTokenDiagnostics = [...diagnostics]
 
   const screenResults: ProjectScreen[] = []
+  const breakpointNames = parsedConfig.config.breakpoints.map((breakpoint) => breakpoint.name)
   for (const candidate of prepared) {
     const parsed = candidate.parsed
     const previousScreen = previousByFile.get(parsed.file)
@@ -287,31 +524,124 @@ export async function loadProject(options: LoadProjectOptions): Promise<DesignPr
         diagnostics: sortDiagnostics(candidate.diagnostics),
         ...(previousScreen?.lastValidRoot === undefined ? {} : { lastValidRoot: previousScreen.lastValidRoot }),
         states: previousScreen?.states ?? [],
+        ...(previousScreen?.variantDocument === undefined ? {} : { variantDocument: previousScreen.variantDocument }),
+        ...(previousScreen?.variantFixtures === undefined ? {} : { variantFixtures: previousScreen.variantFixtures }),
+        ...(previousScreen?.variantSnapshots === undefined
+          ? {}
+          : { variantSnapshots: previousScreen.variantSnapshots }),
+        ...(previousScreen?.variants === undefined
+          ? {}
+          : {
+              variants: previousScreen.variants.map((group) => ({
+                ...group,
+                branches: group.branches.map((branch) => ({ ...branch, stale: true })),
+              })),
+            }),
+        ...(previousScreen?.variantDocument === undefined ? {} : { variantStale: true }),
+        ...(previousScreen?.variantDocument === undefined ? {} : { variantDocumentCurrent: false }),
+        ...(previousScreen?.chosenSelection === undefined ? {} : { chosenSelection: previousScreen.chosenSelection }),
+        blockingErrors: countDiagnostics(candidate.diagnostics).errors,
       })
       continue
     }
-    const semantic = validateTree(candidate.root, parsed.file, {
+    const context: ValidationContext = {
       kit,
       tokens: tokens.tokens,
-      breakpoints: parsedConfig.config.breakpoints.map((breakpoint) => breakpoint.name),
+      breakpoints: breakpointNames,
       projectScreens: screenIds,
       designFolder: folder,
       kitVersionPin: parsedConfig.config.kitVersion,
       installedKitVersion,
-    })
-    const all = sortDiagnostics([...candidate.diagnostics, ...semantic])
-    const hasErrors = countDiagnostics(all).errors > 0
+    }
+    const semantic = validateTree(candidate.root, parsed.file, context)
+    const chosen = candidate.document === undefined ? undefined : resolveVariantDocument(candidate.document, {})
+    const chosenSelection = chosen?.selection ?? {}
+    const variantValidation =
+      candidate.structural && candidate.document !== undefined
+        ? validateVariantProjections({
+            document: candidate.document,
+            file: parsed.file,
+            context,
+            fixtures: loadedFixtures.collections,
+            chosenSelection,
+            chosenErrors: countDiagnostics([...candidate.diagnostics, ...semantic]).errors,
+            ...(candidate.root === undefined ? {} : { chosenRoot: candidate.root }),
+            chosenStates: candidate.states,
+            wholeScreen: candidate.document?.type === 'Variants',
+          })
+        : undefined
+    const structuralBlocking = candidate.diagnostics.filter(
+      (diagnostic) => diagnostic.severity === 'error' && diagnostic.branch === undefined,
+    ).length
+    const chosenBlocking = countDiagnostics(semantic).errors
+    const blockingErrors = structuralBlocking + chosenBlocking + (variantValidation?.limit === undefined ? 0 : 1)
+    const extras = variantValidation?.extras ?? []
+    const all = sortDiagnostics([
+      ...candidate.diagnostics,
+      ...semantic,
+      ...extras,
+      ...(variantValidation?.limit === undefined ? [] : [variantValidation.limit]),
+    ])
+    const hasBlocking = blockingErrors > 0
+    const documentValid = candidate.structural && variantValidation?.limit === undefined
+    const previousSnapshots = previousScreen?.variantSnapshots ?? {}
+    const currentSnapshots = variantValidation?.snapshots ?? {}
+    const snapshots = { ...previousSnapshots, ...currentSnapshots }
+    const flagBranches = (groups: readonly VariantGroupInfo[], forceStale = false): VariantGroupInfo[] =>
+      groups.map((group) => ({
+        ...group,
+        branches: group.branches.map((branch) => {
+          const key = group.path + '|' + branch.id
+          const available = previousSnapshots[key] !== undefined || currentSnapshots[key] !== undefined
+          return {
+            ...branch,
+            ...(forceStale || (!branch.valid && available) ? { stale: true } : {}),
+          }
+        }),
+      }))
+    const currentVariants = documentValid ? flagBranches(variantValidation?.groups ?? []) : undefined
+    const previousVariants =
+      previousScreen?.variants === undefined ? undefined : flagBranches(previousScreen.variants, !documentValid)
+    const variantStale =
+      !documentValid ||
+      (currentVariants ?? previousVariants ?? []).some((group) =>
+        group.branches.some((branch) => branch.stale === true),
+      )
     screenResults.push({
       id: candidate.root.id === '' ? (previousScreen?.id ?? '') : candidate.root.id,
       file: parsed.file,
       root: candidate.root,
       diagnostics: all,
-      ...(hasErrors
+      ...(hasBlocking
         ? previousScreen?.lastValidRoot === undefined
           ? {}
           : { lastValidRoot: previousScreen.lastValidRoot }
         : { lastValidRoot: candidate.root }),
-      states: hasErrors ? (previousScreen?.states ?? []) : candidate.states,
+      states: hasBlocking ? (previousScreen?.states ?? []) : candidate.states,
+      ...(documentValid && candidate.document !== undefined
+        ? { variantDocument: candidate.document }
+        : previousScreen?.variantDocument === undefined
+          ? {}
+          : { variantDocument: previousScreen.variantDocument }),
+      ...(documentValid && candidate.document !== undefined
+        ? { variantFixtures: loadedFixtures.collections }
+        : previousScreen?.variantFixtures === undefined
+          ? {}
+          : { variantFixtures: previousScreen.variantFixtures }),
+      ...(Object.keys(snapshots).length === 0 ? {} : { variantSnapshots: snapshots }),
+      ...(currentVariants === undefined
+        ? previousVariants === undefined
+          ? {}
+          : { variants: previousVariants }
+        : { variants: currentVariants }),
+      ...(variantStale ? { variantStale: true } : {}),
+      ...(documentValid && candidate.document !== undefined
+        ? { variantDocumentCurrent: true }
+        : previousScreen?.variantDocument === undefined
+          ? {}
+          : { variantDocumentCurrent: false }),
+      ...(candidate.selection === undefined ? {} : { chosenSelection: candidate.selection }),
+      blockingErrors,
     })
   }
 

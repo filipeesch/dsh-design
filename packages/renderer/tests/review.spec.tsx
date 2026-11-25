@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { parseScreen } from '../../core/src/parse.ts'
 import { fingerprintDesignTree } from '../../core/src/fingerprint.ts'
+import { resolveVariantDocument } from '../../core/src/variants.ts'
 import { App } from '../src/app.tsx'
 import type { ProjectPayload } from '../src/wire.ts'
 
@@ -36,6 +37,7 @@ interface FakeDraft {
     screen: string
     breakpoint: string
     state?: string
+    variant?: string
     overlays: string[]
     tabs: Record<string, string>
   }
@@ -147,6 +149,47 @@ const namedStates = [
     source: { file: 'screens/home.dsx', line: 1, column: 1 },
   },
 ]
+
+const variantSource =
+  '<Screen id="home" title="Home"><Text>Hello preview</Text><Variants id="layout" chosen="compact"><Variant branch="compact"><Stack><Button id="open">Open</Button><Drawer id="filters" title="Filters"><Text>Drawer body</Text></Drawer></Stack></Variant><Variant branch="spacious"><Stack><Button id="open">Open</Button><Text>Spacious only</Text></Stack></Variant></Variants></Screen>'
+
+function variantScreen(branch: 'compact' | 'spacious'): ProjectPayload['screens'][number] {
+  const parsed = parseScreen(variantSource, 'screens/home.dsx')
+  const projection = resolveVariantDocument(parsed.document!, branch === 'compact' ? {} : { layout: 'spacious' })
+  if (projection.screen === undefined) throw new Error('variant projection failed')
+  return {
+    id: 'home',
+    file: 'screens/home.dsx',
+    root: projection.screen,
+    lastValidRoot: projection.screen,
+    diagnostics: [],
+    errors: 0,
+    warnings: 0,
+    blockingErrors: 0,
+    effectiveSelection: projection.selection,
+    states: [],
+    variants: [
+      {
+        id: 'layout',
+        path: 'layout',
+        chosen: 'compact',
+        source: { file: 'screens/home.dsx', line: 1, column: 1 },
+        wholeScreen: false,
+        branches: [
+          { id: 'compact', source: { file: 'screens/home.dsx', line: 1, column: 1 }, valid: true, diagnostics: [] },
+          { id: 'spacious', source: { file: 'screens/home.dsx', line: 1, column: 1 }, valid: true, diagnostics: [] },
+        ],
+      },
+    ],
+    variant: {
+      group: 'layout',
+      path: 'layout',
+      branch,
+      chosen: branch === 'compact',
+      selection: branch === 'compact' ? { layout: 'compact' } : { layout: 'spacious' },
+    },
+  }
+}
 
 beforeEach(() => {
   drafts = []
@@ -533,6 +576,78 @@ describe('review layer', () => {
     fireEvent.click(screen.getByRole('button', { name: /Pending \(2\)/ }))
     expect(await screen.findByText('different screen')).toBeTruthy()
     expect(screen.getByText('different state')).toBeTruthy()
+  })
+
+  it('pins only the branch a comment was made on and keeps the other branch in the queue', async () => {
+    seedDraft({
+      anchor: { id: 'open', kind: 'stable', type: 'Button', revision: 1 },
+      context: { screen: 'home', breakpoint: 'desktop', variant: 'layout:compact', overlays: [], tabs: {} },
+    })
+    current = payload(1, [variantScreen('spacious')])
+    history.replaceState(null, '', '/design/session-test/home?variant=layout:spacious')
+    render(React.createElement(App))
+    await ready()
+    expect(document.querySelectorAll('.dsx-pin')).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: /Pending \(1\)/ }))
+    expect(await screen.findByText('different variant')).toBeTruthy()
+    cleanup()
+    current = payload(1, [variantScreen('compact')])
+    history.replaceState(null, '', '/design/session-test/home?variant=layout:compact')
+    render(React.createElement(App))
+    await ready()
+    await waitFor(() => expect(document.querySelectorAll('.dsx-pin')).toHaveLength(1))
+  })
+
+  it('shares pins between the normal chosen route and the same explicit branch', async () => {
+    seedDraft({
+      anchor: { id: 'open', kind: 'stable', type: 'Button', revision: 1 },
+      context: { screen: 'home', breakpoint: 'desktop', variant: 'layout:compact', overlays: [], tabs: {} },
+    })
+    current = payload(1, [variantScreen('compact')])
+    history.replaceState(null, '', '/design/session-test/home')
+    render(React.createElement(App))
+    await ready()
+    await waitFor(() => expect(document.querySelectorAll('.dsx-pin')).toHaveLength(1))
+    cleanup()
+    history.replaceState(null, '', '/design/session-test/home?variant=layout:compact')
+    render(React.createElement(App))
+    await ready()
+    await waitFor(() => expect(document.querySelectorAll('.dsx-pin')).toHaveLength(1))
+    cleanup()
+    history.replaceState(null, '', '/design/session-test/home?variant=layout:spacious')
+    current = payload(1, [variantScreen('spacious')])
+    render(React.createElement(App))
+    await ready()
+    expect(document.querySelectorAll('.dsx-pin')).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: /Pending \(1\)/ }))
+    expect(await screen.findByText('different variant')).toBeTruthy()
+  })
+
+  it('records the chosen effective selection on a normal-route comment', async () => {
+    current = payload(1, [variantScreen('compact')])
+    history.replaceState(null, '', '/design/session-test/home')
+    render(React.createElement(App))
+    await ready()
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }))
+    fireEvent.click(document.querySelector('[data-dsx-id="open"]') as HTMLElement)
+    fireEvent.change(screen.getByRole('textbox', { name: 'Comment text' }), { target: { value: 'Chosen note' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save comment' }))
+    await waitFor(() => expect(createCalls).toHaveLength(1))
+    expect(createCalls[0].context.variant).toBe('layout:compact')
+  })
+
+  it('records the effective branch when a comment is created in an explicit pane', async () => {
+    current = payload(1, [variantScreen('spacious')])
+    history.replaceState(null, '', '/design/session-test/home?variant=layout:spacious')
+    render(React.createElement(App))
+    await ready()
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }))
+    fireEvent.click(document.querySelector('[data-dsx-id="open"]') as HTMLElement)
+    fireEvent.change(screen.getByRole('textbox', { name: 'Comment text' }), { target: { value: 'Branch note' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save comment' }))
+    await waitFor(() => expect(createCalls).toHaveLength(1))
+    expect(createCalls[0].context.variant).toBe('layout:spacious')
+    expect(createCalls[0].context.screen).toBe('home')
   })
 
   it('reports the accepted version count when a draft changes during send', async () => {

@@ -1,0 +1,17 @@
+[
+  {
+    "id": "aurora-lamp",
+    "name": "Aurora lamp",
+    "price": "$48"
+  },
+  {
+    "id": "nimbus-notebook",
+    "name": "Nimbus notebook",
+    "price": "$12"
+  },
+  {
+    "id": "harbor-tray",
+    "name": "Harbor tray",
+    "price": "$26"
+  }
+]

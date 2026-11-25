@@ -551,3 +551,216 @@ body {
   font-weight: 600;
   font-style: italic;
 }
+/* Variant selection: badge in the chrome and full-width embedded panes. */
+.dsx-variant-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: #1e293b;
+  border: 1px solid #3b82f6;
+  color: #dbeafe;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.dsx-embed-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: #0f172a;
+  color: #e2e8f0;
+  min-height: 40px;
+}
+.dsx-embed-bar .dsx-review-slot {
+  margin-left: auto;
+}
+.dsx-embed .dsx-stage {
+  padding: 0;
+  overflow: visible;
+}
+.dsx-embed .dsx-frame-wrap {
+  justify-content: flex-start;
+  min-width: 0;
+}
+.dsx-embed .dsx-frame {
+  border-radius: 0;
+  box-shadow: none;
+}
+.dsx-embed .dsx-frame-inner {
+  min-height: 620px;
+}
+
+/* Side-by-side comparison: internal horizontal scrolling, never page overflow. */
+.dsx-compare {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100vw;
+  min-height: 100vh;
+  overflow-x: hidden;
+  background: #eef2f7;
+  color: #0f172a;
+  font-family:
+    'Inter',
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+}
+.dsx-compare-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px 14px;
+  padding: 12px 16px;
+  background: #0f172a;
+  color: #e2e8f0;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+.dsx-compare-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-right: 8px;
+}
+.dsx-compare-title span {
+  color: #94a3b8;
+  font-size: 11px;
+}
+.dsx-compare-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 10px;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.dsx-compare-field select {
+  background: #1e293b;
+  color: #e2e8f0;
+  border: 1px solid #334155;
+  border-radius: 7px;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 12px;
+  text-transform: none;
+  letter-spacing: 0;
+  max-width: 170px;
+}
+.dsx-compare-breakpoints > div {
+  display: flex;
+  gap: 4px;
+}
+.dsx-compare-breakpoints button {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  background: transparent;
+  border: 1px solid #334155;
+  color: inherit;
+  border-radius: 7px;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.dsx-compare-breakpoints button.active {
+  background: #1d4ed8;
+  border-color: #3b82f6;
+}
+.dsx-compare-breakpoints small {
+  color: #94a3b8;
+  font-size: 10px;
+}
+.dsx-compare-link {
+  color: #bfdbfe;
+  font-size: 12px;
+  margin-left: auto;
+  align-self: center;
+}
+.dsx-compare-hint {
+  margin: 10px 16px 4px;
+  font-size: 12px;
+  color: #475569;
+}
+.dsx-compare-notice {
+  margin: 12px 16px 0;
+  border: 1px solid #fca5a5;
+  border-left: 4px solid #dc2626;
+  border-radius: 8px;
+  background: #fff;
+  padding: 10px 14px;
+  font-size: 13px;
+}
+.dsx-compare-scroll {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 8px 16px 18px;
+  outline-offset: -2px;
+}
+.dsx-compare-scroll:focus-visible {
+  outline: 2px solid #2563eb;
+}
+.dsx-compare-panes {
+  display: flex;
+  gap: 2px;
+  align-items: flex-start;
+}
+.dsx-compare-pane {
+  flex: 0 0 auto;
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.14);
+  overflow: hidden;
+}
+.dsx-compare-pane-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #e2e8f0;
+  font-size: 12px;
+}
+.dsx-compare-pane-label span {
+  color: #64748b;
+  font-size: 11px;
+}
+.dsx-compare-pane iframe {
+  display: block;
+  border: 0;
+  background: #fff;
+}
+.dsx-compare-pane-error {
+  padding: 16px;
+  border-left: 4px solid #dc2626;
+  margin: 12px;
+  background: #fef2f2;
+  font-size: 13px;
+}
+.dsx-compare-empty {
+  padding: 32px;
+}
+@media (max-width: 720px) {
+  .dsx-compare-header {
+    padding: 8px 10px;
+    gap: 8px 10px;
+  }
+  .dsx-compare-hint {
+    margin: 8px 10px 2px;
+  }
+  .dsx-compare-scroll {
+    padding: 6px 10px 14px;
+  }
+  .dsx-compare-link {
+    margin-left: 0;
+  }
+}

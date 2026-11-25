@@ -8,6 +8,39 @@ import type {
   ResolvedToken,
 } from '@filipeesch/dsh-design-core'
 
+/** One branch of a variant group inside the payload. */
+export interface WireVariantBranch {
+  readonly id: string
+  readonly source: NamedState['source']
+  readonly valid: boolean
+  /** A previous valid snapshot is kept while the source branch is invalid. */
+  readonly stale?: boolean
+  /** Branch-local Screen states for whole-screen alternatives. */
+  readonly states?: readonly NamedState[]
+  readonly diagnostics: readonly Diagnostic[]
+}
+
+/** One validated variant group inside the payload. */
+export interface WireVariantGroup {
+  readonly id: string
+  readonly path: string
+  readonly chosen: string
+  readonly source: NamedState['source']
+  readonly parentPath?: string
+  readonly parentBranch?: string
+  readonly wholeScreen: boolean
+  readonly branches: readonly WireVariantBranch[]
+}
+
+/** Effective variant selection of the current payload screen. */
+export interface WireVariant {
+  readonly group: string
+  readonly path: string
+  readonly branch: string
+  readonly chosen: boolean
+  readonly selection: Readonly<Record<string, string>>
+}
+
 /** One screen in the project payload. */
 export interface WireScreen {
   readonly id: string
@@ -19,8 +52,18 @@ export interface WireScreen {
   readonly diagnostics: readonly Diagnostic[]
   readonly errors: number
   readonly warnings: number
+  /** Blocking errors for the chosen projection; branch-only errors excluded. */
+  readonly blockingErrors?: number
   /** Validated named initial states for this screen. */
   readonly states?: readonly NamedState[]
+  /** Validated variant groups, including branch validity. */
+  readonly variants?: readonly WireVariantGroup[]
+  /** Effective branch selection, when the payload was resolved explicitly. */
+  readonly variant?: WireVariant
+  /** Effective chosen or explicit selection used to resolve this screen. */
+  readonly effectiveSelection?: Readonly<Record<string, string>>
+  /** True when the screen keeps a previous valid variant snapshot. */
+  readonly variantStale?: boolean
 }
 
 /** Project payload returned by `_/project`. */
@@ -41,6 +84,8 @@ export interface ProjectPayload {
   readonly projectError?: string
   /** Inline data URIs used by the self-contained deterministic document. */
   readonly assets?: Readonly<Record<string, string>>
+  /** Explicit selection failure, for example an unknown group or branch. */
+  readonly variantError?: string
 }
 
 /** Events payload from the SSE stream. */

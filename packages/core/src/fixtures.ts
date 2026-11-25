@@ -58,8 +58,8 @@ function diagnostic(file: string, code: string, message: string, suggestion?: st
   }
 }
 
-/** Read one fixture file into a validated collection. */
-function readCollection(
+/** Read one fixture source into a validated collection. */
+export function parseFixtureCollection(
   id: string,
   file: string,
   source: string,
@@ -242,7 +242,7 @@ export async function loadFixtures(folder: string): Promise<LoadedFixtures> {
       diagnostics.push(diagnostic(file, 'fixture-read', `Fixture "${file}" could not be read.`))
       continue
     }
-    const collection = readCollection(id, file, source, diagnostics)
+    const collection = parseFixtureCollection(id, file, source, diagnostics)
     if (collection !== undefined) collections[id] = collection
   }
   return { collections, diagnostics }

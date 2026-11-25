@@ -7,7 +7,6 @@ import {
   countDiagnostics,
   editDistance,
   formatDiagnostic,
-  findNamedState,
   loadProject,
   projectScreen,
   propsOf,
@@ -21,6 +20,8 @@ import { BrowserSessions } from './browser.ts'
 import { DesignBrowserError } from './browser.ts'
 import { captureScreenshot, payloadFor, readSnapshot, runJourney, runLint, type CheckContext } from './checks.ts'
 import { queryDesign } from './query.ts'
+import { diffGitRevisions, diffVariantBranches, formatDesignDiff } from './diff.ts'
+import { compatibleState, resolveScreenProjection } from './projection.ts'
 import { changedFiles, fingerprintFolder, type FolderFingerprint } from './runtime.ts'
 
 /** Plugin name. */
@@ -149,7 +150,16 @@ async function loadForSession(
 ): Promise<{ facts: SessionFacts; folder: string; project: DesignProject }> {
   const facts = sessionFacts(ctx, exec)
   const folder = ctx.design.folderForCwd(facts.cwd) as string
-  const project = await loadProject({ folder, kit: kitMetadata, installedKitVersion: KIT_VERSION })
+  // Reuse the live runtime so last-valid variant metadata and diagnostics are
+  // visible to tools. Current checks never read a stale projection as current.
+  const runtime = await ctx.design.registry?.forSession(facts.sessionId)
+  const previous = runtime === undefined ? undefined : await runtime.get()
+  const project = await loadProject({
+    folder,
+    kit: kitMetadata,
+    installedKitVersion: KIT_VERSION,
+    ...(previous === undefined ? {} : { previous }),
+  })
   return { facts, folder, project }
 }
 
@@ -364,6 +374,11 @@ export function apply(ctx: any): void {
             },
             errors: { type: 'number', required: true },
             warnings: { type: 'number', required: true },
+            variants: {
+              type: 'array',
+              required: true,
+              items: { type: 'object', additionalProperties: true, properties: {} },
+            },
             message: { type: 'string' },
           },
         },
@@ -400,6 +415,20 @@ export function apply(ctx: any): void {
               const screenCounts = countDiagnostics(screen.diagnostics)
               return { id: screen.id, file: screen.file, errors: screenCounts.errors, warnings: screenCounts.warnings }
             }),
+          variants: project.screens.flatMap((screen) =>
+            (screen.variants ?? []).map((group) => ({
+              screen: screen.id,
+              id: group.id,
+              path: group.path,
+              chosen: group.chosen,
+              branches: group.branches.map((branch) => ({
+                id: branch.id,
+                valid: branch.valid,
+                stale: branch.stale === true,
+                errors: countDiagnostics(branch.diagnostics).errors,
+              })),
+            })),
+          ),
           errors: counts.errors,
           warnings: counts.warnings,
           ...(exists
@@ -471,6 +500,10 @@ export function apply(ctx: any): void {
         depth: { type: 'number', description: 'Maximum node depth.' },
         open: { type: 'boolean', description: 'Expand overlay children instead of marking them closed.' },
         state: { type: 'string', description: 'Named screen state whose overlays start open.' },
+        variant: {
+          type: 'string',
+          description: 'Explicit branch selection as group:branch; defaults to chosen branches.',
+        },
         breakpoint: {
           type: 'string',
           description: 'Configured breakpoint to measure; omit to keep the static projection browser-free.',
@@ -487,6 +520,7 @@ export function apply(ctx: any): void {
             error: { type: 'string' },
             errorCode: { type: 'string' },
             state: { type: 'string' },
+            variant: { type: 'object', additionalProperties: true, properties: {} },
             breakpoint: { type: 'string' },
             layout: { type: 'object', additionalProperties: true, properties: {} },
             screens: { type: 'array', items: { type: 'string' } },
@@ -530,7 +564,7 @@ export function apply(ctx: any): void {
         const available = project.screens.filter((screen) => screen.id !== '').map((screen) => screen.id)
         const screenId = args.screen ?? project.entry
         const screen = project.screens.find((candidate) => candidate.id === screenId)
-        if (screen === undefined || screen.root === undefined) {
+        if (screen === undefined) {
           return {
             screen: screenId ?? '',
             text: '',
@@ -538,12 +572,35 @@ export function apply(ctx: any): void {
             screens: available,
           }
         }
-        const named = args.state === undefined ? undefined : findNamedState(screen.states, args.state)
-        if (args.state !== undefined && named === undefined) {
+        if (screen.root === undefined && args.variant === undefined) {
           return {
             screen: screen.id,
             text: '',
-            error: 'Screen "' + screen.id + '" does not declare state "' + String(args.state) + '".',
+            error: 'No screen "' + String(screen.id) + '" with a parsed tree.',
+            screens: available,
+          }
+        }
+        let projection
+        try {
+          projection = resolveScreenProjection(project, screen.id, args.variant)
+        } catch (error) {
+          return {
+            screen: screen.id,
+            text: '',
+            error: error instanceof Error ? error.message : String(error),
+            screens: available,
+          }
+        }
+        const projected = projection.screen
+        let named
+        try {
+          named = compatibleState(projected, projected.states, args.state)
+        } catch (error) {
+          return {
+            screen: screen.id,
+            text: '',
+            ...(projection.variant === undefined ? {} : { variant: projection.variant }),
+            error: error instanceof Error ? error.message : String(error),
             screens: available,
           }
         }
@@ -558,7 +615,7 @@ export function apply(ctx: any): void {
             }
           }
         }
-        const view = projectScreen(screen.root, {
+        const view = projectScreen(projected.root as NonNullable<typeof projected.root>, {
           ...(args.depth === undefined ? {} : { depth: args.depth }),
           ...(args.node === undefined ? {} : { node: args.node }),
           ...(args.open === undefined ? {} : { openOverlays: args.open }),
@@ -569,9 +626,10 @@ export function apply(ctx: any): void {
           text: view.text,
           ...(view.node === undefined ? {} : { node: view.node }),
           ...(args.state === undefined ? {} : { state: args.state }),
+          ...(projection.variant === undefined ? {} : { variant: projection.variant }),
         }
         if (args.breakpoint === undefined) return base
-        const screenErrors = countDiagnostics(screen.diagnostics).errors
+        const screenErrors = projected.blockingErrors ?? countDiagnostics(projected.diagnostics).errors
         if (screenErrors > 0) {
           return {
             ...base,
@@ -586,7 +644,13 @@ export function apply(ctx: any): void {
           }
         }
         try {
-          const payload = await payloadFor(project, facts.sessionId)
+          const payload = await payloadFor(
+            project,
+            facts.sessionId,
+            projection.variant === undefined
+              ? undefined
+              : { screen: screen.id, group: projection.variant.path, branch: projection.variant.branch },
+          )
           const check = checkContext(ctx, exec)
           const layout = await check.browsers.run(
             {
@@ -874,6 +938,10 @@ export function apply(ctx: any): void {
         breakpoint: { type: 'string', description: 'Configured breakpoint; defaults to the widest.' },
         state: { type: 'string', description: 'Named screen state to apply before capture.' },
         highlight: { type: 'string', description: 'Stable node id to outline temporarily.' },
+        variant: {
+          type: 'string',
+          description: 'Explicit branch selection as group:branch; defaults to chosen branches.',
+        },
       },
       output: {
         schema: {
@@ -885,6 +953,7 @@ export function apply(ctx: any): void {
             state: { type: 'string' },
             breakpoint: { type: 'string', required: true },
             highlight: { type: 'string' },
+            variant: { type: 'object', additionalProperties: true, properties: {} },
             width: { type: 'number', required: true },
             height: { type: 'number', required: true },
             bytes: { type: 'number', required: true },
@@ -909,6 +978,7 @@ export function apply(ctx: any): void {
           ...(args.breakpoint === undefined ? {} : { breakpoint: args.breakpoint }),
           ...(args.state === undefined ? {} : { state: args.state }),
           ...(args.highlight === undefined ? {} : { highlight: args.highlight }),
+          ...(args.variant === undefined ? {} : { variant: args.variant }),
         })
       },
     }),
@@ -926,6 +996,10 @@ export function apply(ctx: any): void {
         value: { description: 'Exact scalar prop value (string, number, or boolean).' },
         id: { type: 'string', description: 'Node id glob using only * and ?.' },
         limit: { type: 'number', description: 'Maximum matches (1-200).' },
+        variant: {
+          type: 'string',
+          description: 'Explicit branch selection as group:branch; defaults to chosen branches.',
+        },
       },
       output: {
         schema: {
@@ -939,6 +1013,7 @@ export function apply(ctx: any): void {
             },
             total: { type: 'number', required: true },
             truncated: { type: 'boolean', required: true },
+            variant: { type: 'object', additionalProperties: true, properties: {} },
           },
         },
         render: (_args: unknown, value: any) =>
@@ -974,14 +1049,103 @@ export function apply(ctx: any): void {
         if (args.prop === undefined && args.value !== undefined) {
           throw new Error('design_query: argument "value" requires "prop"')
         }
-        return queryDesign(project, {
-          ...(args.screen === undefined ? {} : { screen: args.screen }),
+        const screenId = args.screen ?? project.entry
+        if (screenId === undefined) return { matches: [], total: 0, truncated: false }
+        let projection
+        try {
+          projection = resolveScreenProjection(project, screenId, args.variant)
+        } catch (error) {
+          throw new Error('design_query: ' + (error instanceof Error ? error.message : String(error)), { cause: error })
+        }
+        const scopedProject: DesignProject = {
+          ...project,
+          screens: project.screens.map((screen) => (screen.id === screenId ? projection.screen : screen)),
+        }
+        const result = queryDesign(scopedProject, {
+          ...(args.screen === undefined ? {} : { screen: screenId }),
           ...(args.component === undefined ? {} : { component: args.component }),
           ...(args.prop === undefined ? {} : { prop: args.prop }),
           ...(args.value === undefined ? {} : { value: args.value }),
           ...(args.id === undefined ? {} : { id: args.id }),
           ...(args.limit === undefined ? {} : { limit: args.limit }),
         })
+        return projection.variant === undefined ? result : { ...result, variant: projection.variant }
+      },
+    }),
+  )
+
+  ctx.tools.register(
+    tool({
+      name: 'design_diff',
+      description:
+        'Compare two branch selections of one screen, or the chosen projection at two locally available Git revisions; deterministic semantic additions, removals, moves, and typed changes without a checkout.',
+      parameters: {
+        screen: { type: 'string', required: true, description: 'Screen id to compare.' },
+        group: { type: 'string', description: 'Variant group path for branch comparison.' },
+        from: { type: 'string', description: 'Earlier branch id for branch comparison.' },
+        to: { type: 'string', description: 'Later branch id for branch comparison.' },
+        fromRevision: { type: 'string', description: 'Earlier local Git revision for revision comparison.' },
+        toRevision: { type: 'string', description: 'Later local Git revision for revision comparison.' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            ok: { type: 'boolean', required: true },
+            mode: { type: 'string', required: true },
+            screen: { type: 'string', required: true },
+            from: { type: 'string', required: true },
+            to: { type: 'string', required: true },
+            additions: {
+              type: 'array',
+              required: true,
+              items: { type: 'object', additionalProperties: true, properties: {} },
+            },
+            removals: {
+              type: 'array',
+              required: true,
+              items: { type: 'object', additionalProperties: true, properties: {} },
+            },
+            moves: {
+              type: 'array',
+              required: true,
+              items: { type: 'object', additionalProperties: true, properties: {} },
+            },
+            changes: {
+              type: 'array',
+              required: true,
+              items: { type: 'object', additionalProperties: true, properties: {} },
+            },
+            diagnostics: {
+              type: 'array',
+              required: true,
+              items: { type: 'object', additionalProperties: true, properties: {} },
+            },
+          },
+        },
+        render: (_args: unknown, value: any) => text(formatDesignDiff(value)),
+      },
+      async execute(args: any, exec: any) {
+        const { project } = await loadForSession(ctx, exec)
+        const variantMode = args.group !== undefined || args.from !== undefined || args.to !== undefined
+        const revisionMode = args.fromRevision !== undefined || args.toRevision !== undefined
+        if (variantMode && revisionMode) {
+          throw new Error('design_diff: use either group/from/to or fromRevision/toRevision, not both')
+        }
+        if (variantMode) {
+          if (args.group === undefined || args.from === undefined || args.to === undefined) {
+            throw new Error('design_diff: branch comparison requires group, from, and to')
+          }
+          return diffVariantBranches(project, args.screen, args.group, args.from, args.to)
+        }
+        if (revisionMode) {
+          if (args.fromRevision === undefined || args.toRevision === undefined) {
+            throw new Error('design_diff: revision comparison requires fromRevision and toRevision')
+          }
+          return diffGitRevisions(project, args.screen, args.fromRevision, args.toRevision)
+        }
+        throw new Error('design_diff: choose either group/from/to or fromRevision/toRevision')
       },
     }),
   )
