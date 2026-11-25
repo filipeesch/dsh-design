@@ -7,6 +7,7 @@ import {
   countDiagnostics,
   editDistance,
   formatDiagnostic,
+  findNamedState,
   loadProject,
   projectScreen,
   propsOf,
@@ -16,6 +17,10 @@ import {
   type Diagnostic,
 } from '@filipeesch/dsh-design-core'
 import { KIT_VERSION, componentNames, kitMetadata } from '@filipeesch/dsh-design-kit/meta'
+import { BrowserSessions } from './browser.ts'
+import { DesignBrowserError } from './browser.ts'
+import { captureScreenshot, payloadFor, readSnapshot, runJourney, runLint, type CheckContext } from './checks.ts'
+import { queryDesign } from './query.ts'
 import { changedFiles, fingerprintFolder, type FolderFingerprint } from './runtime.ts'
 
 /** Plugin name. */
@@ -113,6 +118,18 @@ function userMessage(text: string): unknown {
 interface SessionFacts {
   readonly sessionId: string
   readonly cwd: string
+}
+
+/** Build the services one headless check needs for a calling session. */
+function checkContext(ctx: any, exec: any): CheckContext {
+  const facts = sessionFacts(ctx, exec)
+  return {
+    sessionId: facts.sessionId,
+    browsers: ctx.design.browsers as BrowserSessions,
+    assetsDir: ctx.design.assetsDir as string,
+    ...(exec.signal === undefined ? {} : { signal: exec.signal as AbortSignal }),
+    ...(ctx.design.browserTimeoutMs === undefined ? {} : { timeoutMs: ctx.design.browserTimeoutMs as number }),
+  }
 }
 
 /** Resolve the calling session and its working directory. */
@@ -447,12 +464,17 @@ export function apply(ctx: any): void {
     tool({
       name: 'design_view',
       description:
-        'Return a compact indented text projection of a screen, optionally one subtree and with overlays expanded.',
+        'Return a compact indented text projection of a screen, optionally one subtree, a named state, and a measured layout snapshot at one breakpoint.',
       parameters: {
         screen: { type: 'string', description: 'Screen id; defaults to the project entry screen.' },
         node: { type: 'string', description: 'Node id to project only that subtree.' },
         depth: { type: 'number', description: 'Maximum node depth.' },
         open: { type: 'boolean', description: 'Expand overlay children instead of marking them closed.' },
+        state: { type: 'string', description: 'Named screen state whose overlays start open.' },
+        breakpoint: {
+          type: 'string',
+          description: 'Configured breakpoint to measure; omit to keep the static projection browser-free.',
+        },
       },
       output: {
         schema: {
@@ -463,13 +485,48 @@ export function apply(ctx: any): void {
             text: { type: 'string', required: true },
             node: { type: 'string' },
             error: { type: 'string' },
+            errorCode: { type: 'string' },
+            state: { type: 'string' },
+            breakpoint: { type: 'string' },
+            layout: { type: 'object', additionalProperties: true, properties: {} },
             screens: { type: 'array', items: { type: 'string' } },
           },
         },
-        render: (_args: unknown, value: any) => text(value.error ?? value.text),
+        render: (_args: unknown, value: any) => {
+          if (value.error !== undefined) return text(value.error)
+          if (value.layout === undefined) return text(value.text)
+          return text(
+            value.text +
+              '\n\nLayout at ' +
+              String(value.breakpoint) +
+              ' (' +
+              String(value.layout.canvas?.width) +
+              'x' +
+              String(value.layout.canvas?.height) +
+              '):\n' +
+              value.layout.nodes
+                .map(
+                  (node: any) =>
+                    '  ' +
+                    (node.id ?? node.address) +
+                    ' <' +
+                    node.type +
+                    '> ' +
+                    String(node.x) +
+                    ',' +
+                    String(node.y) +
+                    ' ' +
+                    String(node.width) +
+                    'x' +
+                    String(node.height),
+                )
+                .join('\n') +
+              (value.layout.truncated === true ? '\n  … snapshot truncated' : ''),
+          )
+        },
       },
       async execute(args: any, exec: any) {
-        const { project } = await loadForSession(ctx, exec)
+        const { facts, project } = await loadForSession(ctx, exec)
         const available = project.screens.filter((screen) => screen.id !== '').map((screen) => screen.id)
         const screenId = args.screen ?? project.entry
         const screen = project.screens.find((candidate) => candidate.id === screenId)
@@ -481,12 +538,79 @@ export function apply(ctx: any): void {
             screens: available,
           }
         }
+        const named = args.state === undefined ? undefined : findNamedState(screen.states, args.state)
+        if (args.state !== undefined && named === undefined) {
+          return {
+            screen: screen.id,
+            text: '',
+            error: 'Screen "' + screen.id + '" does not declare state "' + String(args.state) + '".',
+            screens: available,
+          }
+        }
+        if (args.breakpoint !== undefined) {
+          const known = project.config.breakpoints.some((breakpoint) => breakpoint.name === args.breakpoint)
+          if (!known) {
+            return {
+              screen: screen.id,
+              text: '',
+              error: 'Unknown breakpoint "' + String(args.breakpoint) + '".',
+              screens: available,
+            }
+          }
+        }
         const view = projectScreen(screen.root, {
           ...(args.depth === undefined ? {} : { depth: args.depth }),
           ...(args.node === undefined ? {} : { node: args.node }),
           ...(args.open === undefined ? {} : { openOverlays: args.open }),
+          ...(named === undefined ? {} : { openIds: named.open }),
         })
-        return { screen: screen.id, text: view.text, ...(view.node === undefined ? {} : { node: view.node }) }
+        const base = {
+          screen: screen.id,
+          text: view.text,
+          ...(view.node === undefined ? {} : { node: view.node }),
+          ...(args.state === undefined ? {} : { state: args.state }),
+        }
+        if (args.breakpoint === undefined) return base
+        const screenErrors = countDiagnostics(screen.diagnostics).errors
+        if (screenErrors > 0) {
+          return {
+            ...base,
+            text: '',
+            breakpoint: args.breakpoint,
+            error:
+              'Screen "' +
+              screen.id +
+              '" has ' +
+              String(screenErrors) +
+              ' validation error(s); fix them before requesting computed layout.',
+          }
+        }
+        try {
+          const payload = await payloadFor(project, facts.sessionId)
+          const check = checkContext(ctx, exec)
+          const layout = await check.browsers.run(
+            {
+              sessionId: check.sessionId,
+              payload,
+              assetsDir: check.assetsDir,
+              screen: screen.id,
+              breakpoint: args.breakpoint,
+              breakpointWidth: (
+                project.config.breakpoints.find((candidate) => candidate.name === args.breakpoint) as { width: number }
+              ).width,
+              ...(args.state === undefined ? {} : { state: args.state }),
+              ...(check.signal === undefined ? {} : { signal: check.signal }),
+              ...(check.timeoutMs === undefined ? {} : { timeoutMs: check.timeoutMs }),
+            },
+            (page) => readSnapshot(page, screen.id, args.breakpoint, args.state),
+          )
+          return { ...base, breakpoint: args.breakpoint, layout }
+        } catch (error) {
+          if (error instanceof DesignBrowserError) {
+            return { ...base, text: '', breakpoint: args.breakpoint, error: error.message, errorCode: error.code }
+          }
+          throw error
+        }
       },
     }),
   )
@@ -585,6 +709,279 @@ export function apply(ctx: any): void {
           })),
           example: meta.example,
         }
+      },
+    }),
+  )
+
+  ctx.tools.register(
+    tool({
+      name: 'design_run_journey',
+      description:
+        'Execute one validated journey against a clean headless render; returns ordered step outcomes and the failing screen snapshot.',
+      parameters: {
+        journey: { type: 'string', required: true, description: 'Journey id declared in design/journeys.' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            journey: { type: 'string', required: true },
+            screen: { type: 'string', required: true },
+            state: { type: 'string' },
+            breakpoint: { type: 'string', required: true },
+            ok: { type: 'boolean', required: true },
+            steps: {
+              type: 'array',
+              required: true,
+              items: { type: 'object', additionalProperties: true, properties: {} },
+            },
+            snapshot: { type: 'object', additionalProperties: true, properties: {} },
+            error: { type: 'string' },
+            diagnostics: { type: 'array', items: { type: 'object', additionalProperties: true, properties: {} } },
+          },
+        },
+        render: (_args: unknown, value: any) => {
+          if (value.error !== undefined)
+            return text(
+              'Journey ' +
+                value.journey +
+                ': ' +
+                value.error +
+                (value.diagnostics === undefined ? '' : '\n' + value.diagnostics.map(formatDiagnostic).join('\n')),
+            )
+          const lines = [
+            'Journey ' +
+              value.journey +
+              ' on ' +
+              value.screen +
+              (value.state === undefined ? '' : ' state ' + value.state) +
+              ' at ' +
+              value.breakpoint +
+              ': ' +
+              (value.ok ? 'passed' : 'failed'),
+            ...value.steps.map(
+              (step: any) =>
+                '  ' +
+                String(step.index + 1) +
+                '. ' +
+                step.kind +
+                ' ' +
+                step.status +
+                (step.expected === undefined ? '' : ' expected=' + step.expected) +
+                (step.observed === undefined ? '' : ' observed=' + step.observed) +
+                (step.message === undefined ? '' : ' (' + step.message + ')'),
+            ),
+          ]
+          if (value.snapshot !== undefined) {
+            lines.push(
+              'Failure snapshot: ' +
+                String(value.snapshot.nodes.length) +
+                ' node(s) at ' +
+                String(value.snapshot.canvas.width) +
+                'x' +
+                String(value.snapshot.canvas.height) +
+                '.',
+            )
+          }
+          return text(lines.join('\n'))
+        },
+      },
+      async execute(args: any, exec: any) {
+        const { project } = await loadForSession(ctx, exec)
+        const result = await runJourney(checkContext(ctx, exec), project, args.journey)
+        return result
+      },
+    }),
+  )
+
+  ctx.tools.register(
+    tool({
+      name: 'design_lint',
+      description:
+        'Measure layout across configured breakpoints and report overflow, peer overlap, clipped text, small tap targets, and off-token warnings.',
+      parameters: {
+        screen: { type: 'string', required: true, description: 'Screen id to lint.' },
+        state: { type: 'string', description: 'Named screen state to apply before measuring.' },
+        breakpoint: { type: 'string', description: 'One configured breakpoint; omit to lint every breakpoint.' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            screen: { type: 'string', required: true },
+            state: { type: 'string' },
+            breakpoints: { type: 'array', required: true, items: { type: 'string' } },
+            findings: {
+              type: 'array',
+              required: true,
+              items: { type: 'object', additionalProperties: true, properties: {} },
+            },
+            errors: { type: 'number', required: true },
+            warnings: { type: 'number', required: true },
+          },
+        },
+        render: (_args: unknown, value: any) => {
+          const header =
+            'Lint ' +
+            value.screen +
+            (value.state === undefined ? '' : ' state ' + value.state) +
+            ' across ' +
+            value.breakpoints.join(', ') +
+            ': ' +
+            String(value.errors) +
+            ' error(s), ' +
+            String(value.warnings) +
+            ' warning(s).'
+          if (value.findings.length === 0) return text(header)
+          return text(
+            header +
+              '\n' +
+              value.findings
+                .map(
+                  (finding: any) =>
+                    '  ' +
+                    finding.rule +
+                    ' [' +
+                    (finding.breakpoint ?? 'all') +
+                    '] ' +
+                    finding.nodes.join(', ') +
+                    ': ' +
+                    finding.message,
+                )
+                .join('\n'),
+          )
+        },
+      },
+      async execute(args: any, exec: any) {
+        const { project } = await loadForSession(ctx, exec)
+        return await runLint(checkContext(ctx, exec), project, args.screen, {
+          ...(args.state === undefined ? {} : { state: args.state }),
+          ...(args.breakpoint === undefined ? {} : { breakpoint: args.breakpoint }),
+        })
+      },
+    }),
+  )
+
+  ctx.tools.register(
+    tool({
+      name: 'design_screenshot',
+      description:
+        'Capture the rendered canvas as a deterministic PNG under the design cache, optionally highlighting one stable node; use only when visual evidence is needed.',
+      parameters: {
+        screen: { type: 'string', required: true, description: 'Screen id to capture.' },
+        breakpoint: { type: 'string', description: 'Configured breakpoint; defaults to the widest.' },
+        state: { type: 'string', description: 'Named screen state to apply before capture.' },
+        highlight: { type: 'string', description: 'Stable node id to outline temporarily.' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            path: { type: 'string', required: true },
+            screen: { type: 'string', required: true },
+            state: { type: 'string' },
+            breakpoint: { type: 'string', required: true },
+            highlight: { type: 'string' },
+            width: { type: 'number', required: true },
+            height: { type: 'number', required: true },
+            bytes: { type: 'number', required: true },
+          },
+        },
+        render: (_args: unknown, value: any) =>
+          text(
+            'Wrote ' +
+              value.path +
+              ' (' +
+              String(Math.round(value.width)) +
+              'x' +
+              String(Math.round(value.height)) +
+              ', ' +
+              String(value.bytes) +
+              ' bytes). Inspect it with the image-reading tool.',
+          ),
+      },
+      async execute(args: any, exec: any) {
+        const { project } = await loadForSession(ctx, exec)
+        return await captureScreenshot(checkContext(ctx, exec), project, args.screen, {
+          ...(args.breakpoint === undefined ? {} : { breakpoint: args.breakpoint }),
+          ...(args.state === undefined ? {} : { state: args.state }),
+          ...(args.highlight === undefined ? {} : { highlight: args.highlight }),
+        })
+      },
+    }),
+  )
+
+  ctx.tools.register(
+    tool({
+      name: 'design_query',
+      description:
+        'Filter the validated design tree by screen, component, exact scalar prop, and id glob using * or ?; no browser and no executable selectors.',
+      parameters: {
+        screen: { type: 'string', description: 'Restrict to one screen id.' },
+        component: { type: 'string', description: 'Exact component name, for example Input.' },
+        prop: { type: 'string', description: 'Prop name for an exact scalar match.' },
+        value: { description: 'Exact scalar prop value (string, number, or boolean).' },
+        id: { type: 'string', description: 'Node id glob using only * and ?.' },
+        limit: { type: 'number', description: 'Maximum matches (1-200).' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            matches: {
+              type: 'array',
+              required: true,
+              items: { type: 'object', additionalProperties: true, properties: {} },
+            },
+            total: { type: 'number', required: true },
+            truncated: { type: 'boolean', required: true },
+          },
+        },
+        render: (_args: unknown, value: any) =>
+          text(
+            value.matches.length === 0
+              ? 'No nodes match the query.'
+              : value.matches
+                  .map(
+                    (match: any) =>
+                      match.screen +
+                      ' ' +
+                      match.node +
+                      ' <' +
+                      match.component +
+                      '> ' +
+                      match.file +
+                      ':' +
+                      String(match.line) +
+                      ':' +
+                      String(match.column),
+                  )
+                  .join('\n') + (value.truncated ? '\n… ' + String(value.total - value.matches.length) + ' more' : ''),
+          ),
+      },
+      async execute(args: any, exec: any) {
+        const { project } = await loadForSession(ctx, exec)
+        if (args.value !== undefined) {
+          const kind = typeof args.value
+          if (kind !== 'string' && kind !== 'number' && kind !== 'boolean') {
+            throw new Error('design_query: argument "value" must be a string, number, or boolean')
+          }
+        }
+        if (args.prop === undefined && args.value !== undefined) {
+          throw new Error('design_query: argument "value" requires "prop"')
+        }
+        return queryDesign(project, {
+          ...(args.screen === undefined ? {} : { screen: args.screen }),
+          ...(args.component === undefined ? {} : { component: args.component }),
+          ...(args.prop === undefined ? {} : { prop: args.prop }),
+          ...(args.value === undefined ? {} : { value: args.value }),
+          ...(args.id === undefined ? {} : { id: args.id }),
+          ...(args.limit === undefined ? {} : { limit: args.limit }),
+        })
       },
     }),
   )

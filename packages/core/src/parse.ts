@@ -24,8 +24,10 @@ import type {
   DesignProps,
   DesignPropValue,
   Diagnostic,
+  FixtureRef,
   InteractionAction,
   InteractionRef,
+  ItemRef,
   ParsedScreen,
   SourceLocation,
   StructuralAddress,
@@ -109,6 +111,33 @@ function rejectExpression(ctx: ParserContext, expression: Expression | Node, mes
   return undefined
 }
 
+/** Parse `fixture("id")` or `item("field")` into a declarative reference. */
+function parseDeclarativeRef(
+  ctx: ParserContext,
+  node: CallExpression,
+  callee: 'fixture' | 'item',
+): FixtureRef | ItemRef | undefined {
+  if (node.arguments.length !== 1 || node.arguments[0]?.type === 'SpreadElement') {
+    report(ctx, node, callee + '-arguments', callee + '() takes exactly one quoted string.')
+    return undefined
+  }
+  const argument = node.arguments[0]
+  if (argument?.type !== 'StringLiteral') {
+    report(ctx, node, callee + '-argument', callee + '() requires a quoted string.')
+    return undefined
+  }
+  return callee === 'fixture' ? { $fixture: argument.value } : { $item: argument.value }
+}
+
+/** Parse any allowed call value: a declarative reference or an interaction. */
+function parseCallValue(ctx: ParserContext, node: CallExpression): DesignPropValue | undefined {
+  const callee = node.callee
+  if (callee.type === 'Identifier' && (callee.name === 'fixture' || callee.name === 'item')) {
+    return parseDeclarativeRef(ctx, node, callee.name)
+  }
+  return parseInteraction(ctx, node)
+}
+
 /** Parse an interaction reference call such as `open("filters")`. */
 function parseInteraction(ctx: ParserContext, node: CallExpression): InteractionRef | undefined {
   const callee = node.callee
@@ -154,6 +183,15 @@ function parseObject(ctx: ParserContext, node: ObjectExpression): Record<string,
       report(ctx, prop, 'expression-not-allowed', 'Object keys must be plain names or string literals.')
       continue
     }
+    if (Object.prototype.hasOwnProperty.call(result, key)) {
+      report(
+        ctx,
+        prop,
+        'duplicate-object-key',
+        `Duplicate object key "${key}"; later values do not override earlier ones silently.`,
+      )
+      continue
+    }
     const value = parseValue(ctx, prop.value as Expression)
     if (value !== undefined) result[key] = value
   }
@@ -194,7 +232,7 @@ function parseValue(ctx: ParserContext, expression: Node): DesignPropValue | und
     case 'ObjectExpression':
       return parseObject(ctx, expression)
     case 'CallExpression':
-      return parseInteraction(ctx, expression)
+      return parseCallValue(ctx, expression)
     case 'JSXElement':
     case 'JSXFragment':
       return rejectExpression(ctx, expression, 'Elements are not allowed inside a prop value; pass them as children.')
@@ -255,6 +293,7 @@ function parseElement(ctx: ParserContext, node: JSXElement, address: StructuralA
   }
 
   const props: DesignProps = {}
+  const propLocations: Record<string, SourceLocation> = {}
   for (const attribute of opening.attributes) {
     if (attribute.type === 'JSXSpreadAttribute') {
       report(ctx, attribute, 'expression-not-allowed', 'Spread attributes are not allowed in the design DSL.')
@@ -266,7 +305,10 @@ function parseElement(ctx: ParserContext, node: JSXElement, address: StructuralA
       continue
     }
     const value = parseAttributeValue(ctx, attribute)
-    if (value !== undefined) props[key] = value
+    if (value !== undefined) {
+      props[key] = value
+      propLocations[key] = locationOf(attribute, ctx.file)
+    }
   }
 
   const children: DesignChild[] = []
@@ -292,6 +334,22 @@ function parseElement(ctx: ParserContext, node: JSXElement, address: StructuralA
     }
     if (child.type === 'JSXExpressionContainer') {
       if (child.expression.type === 'JSXEmptyExpression') continue
+      if (
+        child.expression.type === 'CallExpression' &&
+        child.expression.callee.type === 'Identifier' &&
+        child.expression.callee.name === 'item'
+      ) {
+        const reference = parseDeclarativeRef(ctx, child.expression, 'item')
+        if (reference !== undefined && '$item' in reference) {
+          children.push({
+            kind: 'text',
+            value: '',
+            itemField: reference.$item,
+            source: locationOf(child, ctx.file),
+          })
+        }
+        continue
+      }
       if (child.expression.type === 'StringLiteral' || child.expression.type === 'NumericLiteral') {
         children.push({ kind: 'text', value: String(child.expression.value), source: locationOf(child, ctx.file) })
         continue
@@ -316,6 +374,7 @@ function parseElement(ctx: ParserContext, node: JSXElement, address: StructuralA
     children,
     source: locationOf(node, ctx.file),
     address,
+    ...(Object.keys(propLocations).length === 0 ? {} : { propLocations }),
   }
 }
 

@@ -2,8 +2,9 @@
 import { join, resolve } from 'node:path'
 import { normalizeFolderName } from '@filipeesch/dsh-design-core'
 import { KIT_VERSION, kitMetadata } from '@filipeesch/dsh-design-kit/meta'
+import { BrowserSessions } from './browser.ts'
 import { ProjectRegistry } from './registry.ts'
-import { createRouteHandler } from './routes.ts'
+import { createRouteHandler, defaultAssetsDir } from './routes.ts'
 
 /** Plugin name. */
 export const name = 'design-host'
@@ -16,6 +17,16 @@ export interface DesignConfig {
   debounceMs?: number
   /** Idle time before a project watcher stops. */
   idleStopMs?: number
+  /** Built renderer assets used by deterministic headless checks. */
+  assetsDir?: string
+  /** Operator-configured Chromium executable for headless checks. */
+  chromiumPath?: string
+  /** Overall timeout for one headless check. */
+  browserTimeoutMs?: number
+  /** Maximum live session browsers. */
+  maxBrowserSessions?: number
+  /** Fixed browser viewport height for headless checks. */
+  viewportHeight?: number
 }
 
 /**
@@ -27,12 +38,26 @@ export class DesignService {
   readonly registry: ProjectRegistry | undefined
   /** Configured design folder name (one safe path segment). */
   readonly folderName: string
+  /** Warm browser sessions for headless checks, keyed by DSH session. */
+  readonly browsers: BrowserSessions
+  /** Built renderer assets used by deterministic checks. */
+  readonly assetsDir: string
+  /** Overall timeout for one headless check. */
+  readonly browserTimeoutMs: number
   private readonly ctx: any
 
   constructor(ctx: any, config: DesignConfig = {}) {
     this.ctx = ctx
     const folderName = normalizeFolderName(config.folderName ?? 'design')
     this.folderName = folderName
+    this.assetsDir = config.assetsDir ?? defaultAssetsDir()
+    this.browserTimeoutMs = config.browserTimeoutMs ?? 20000
+    this.browsers = new BrowserSessions({
+      ...(config.chromiumPath === undefined ? {} : { executablePath: config.chromiumPath }),
+      ...(config.browserTimeoutMs === undefined ? {} : { timeoutMs: config.browserTimeoutMs }),
+      ...(config.maxBrowserSessions === undefined ? {} : { maxSessions: config.maxBrowserSessions }),
+      ...(config.viewportHeight === undefined ? {} : { viewportHeight: config.viewportHeight }),
+    })
     const settings = {
       folderName,
       debounceMs: config.debounceMs ?? 50,
@@ -80,6 +105,17 @@ export class DesignService {
   previewUrl(sessionId: string, screen?: string): string {
     return this.registry?.previewUrl(sessionId, screen) ?? ''
   }
+
+  /** Release one session's browser; safe when none was launched. */
+  async disposeSession(sessionId: string): Promise<void> {
+    await this.browsers.disposeSession(sessionId)
+  }
+
+  /** Release every browser and project runtime. */
+  async dispose(): Promise<void> {
+    this.registry?.dispose()
+    await this.browsers.disposeAll()
+  }
 }
 
 /**
@@ -101,6 +137,12 @@ export function apply(ctx: any, config: DesignConfig = {}): void {
     }
     const service = new DesignService(ctx, config)
     ctx.provide('design', service)
+    if (typeof ctx.on === 'function') {
+      ctx.on('session/disposed', (event: any) => {
+        const sessionId = typeof event === 'string' ? event : (event?.id ?? event?.sessionId ?? event?.session?.id)
+        if (typeof sessionId === 'string' && sessionId !== '') void service.disposeSession(sessionId)
+      })
+    }
     ctx.effect(
       () =>
         webServer.register({
@@ -110,7 +152,7 @@ export function apply(ctx: any, config: DesignConfig = {}): void {
         }),
       'design: preview route',
     )
-    ctx.effect(() => () => service.registry?.dispose(), 'design: project registry')
+    ctx.effect(() => () => service.dispose(), 'design: project and browser resources')
   }
   if (typeof ctx.inject === 'function') {
     ctx.inject(['webServer'], start)

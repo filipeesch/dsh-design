@@ -4,15 +4,17 @@ The design plugin for DeepSeek Harness (DSH). It lets an agent sketch a
 clickable, responsive web app in a restricted JSX-style DSL, preview it live in
 the browser, and iterate with validation feedback attached to every edit.
 
-This repository implements the `add-design-foundation` OpenSpec change. The
-plugin is developed here, outside the DSH source tree, and installed into a DSH
-profile with `dsh plugin`.
+This repository implements the `add-design-foundation` and
+`add-design-journeys-and-checks` OpenSpec changes. The plugin is developed here,
+outside the DSH source tree, and installed into a DSH profile with `dsh plugin`.
 
 ## Requirements
 
 - Node.js 24.9 or newer
 - pnpm 11
 - A DSH installation whose profile can install local bundles
+- Optional: a Playwright Chromium for headless journeys, lint, layout snapshots,
+  and screenshots. Preview and static tools work without one.
 
 ## Build
 
@@ -22,6 +24,8 @@ pnpm run build
 pnpm run test
 pnpm run check   # build, lint, format, EOF-newline check, tests
 # real Chromium regressions run when a Playwright browser is available; otherwise they skip
+# install the matching browser for the full suite:
+pnpm exec playwright install chromium
 ```
 
 ## Install
@@ -44,8 +48,9 @@ dsh plugin --profile <profile> add <checkout>/dist/filipeesch-dsh-design-bundle-
 Either route installs the same built bundle; the tarball does not require the
 profile to see the source checkout. Restart DSH after installing. The profile
 then lists the **Design** agent preset, and the preview route answers under
-`/design/<session-id>/` on the DSH web server. Opening a design session gives the agent `design_init`,
-`design_status`, `design_validate`, `design_view`, and `design_catalog`.
+`/design/<session-id>/` on the DSH web server. Opening a design session gives the agent `design_init`, `design_status`,
+`design_validate`, `design_view` (including measured layout), `design_catalog`,
+`design_run_journey`, `design_lint`, `design_screenshot`, and `design_query`.
 
 A session whose working directory contains `design/design.json` gets a live
 preview. The agent shares the URL from `design_status`; open it in a normal
@@ -85,8 +90,73 @@ starts normally. Design folders in target repositories stay as plain files.
 | `bundle`   | Installable DSH bundle composing the above                                            |
 
 Design files in a target repository are versioned sources: `design/design.json`,
-`design/tokens.json`, and `design/screens/*.dsx`. Derived files belong only in
-`design/.cache/`, which the scaffolded `.gitignore` excludes.
+`design/tokens.json`, `design/screens/*.dsx`, optional
+`design/fixtures/*.json`, and optional `design/journeys/*.dsx`. Derived files
+(including screenshots) belong only in `design/.cache/`, which the scaffolded
+`.gitignore` excludes.
+
+## Named states, fixtures, and journeys
+
+A screen can declare deterministic starting points:
+
+```jsx
+<Screen id="orders" states={{ "filter-open": { open: ["filters"], values: { search: "acme" } } }}>
+```
+
+Open one with `/design/<session>/orders?bp=mobile&state=filter-open`. The state is
+seeded once per screen/state route transition, survives valid hot reloads, and
+does not reseed when only the breakpoint changes.
+
+Fixtures are bounded, project-local JSON arrays of flat fictitious objects with
+unique kebab-case `id`s. Bind them without writing logic:
+
+```jsx
+<List id="orders" items={fixture("orders")}>
+  <ItemTemplate>
+    <Text>{item("name")}</Text>
+  </ItemTemplate>
+</List>
+<Table columns={[{ label: "Name", field: "name" }]} rows={fixture("orders")} />
+<Select id="plan" options={fixture("plans")} />
+```
+
+Journeys live in `design/journeys/*.dsx` and use stable design ids:
+
+```jsx
+<Journey id="checkout" start="orders" state="filter-open" breakpoint="mobile">
+  <Choose target="plan" value="pro" />
+  <Type target="email" value="ada@example.com" />
+  <Tap target="place-order" />
+  <ExpectScreen screen="confirmation" />
+</Journey>
+```
+
+See [`examples/synthetic-checkout`](examples/synthetic-checkout) for a runnable,
+entirely fictitious project covering states, fixtures, tables, lists, selects,
+and two journeys.
+
+## Headless checks
+
+`design_run_journey` executes the declared steps on the real kit controls and
+stops at the first failed step with a bounded semantic snapshot. `design_lint`
+measures every configured breakpoint for canvas/container overflow, peer
+overlap, clipped text, pointer targets under 44 CSS pixels, and validator
+off-token warnings. `design_screenshot` is opt-in and writes a deterministic
+canvas-only PNG under `design/.cache/screenshots/`. `design_view` with an
+explicit `breakpoint` returns computed boxes; without it, it stays browser-free.
+
+Browser work is lazy: one Chromium per active DSH session, serialized per
+session, fresh isolated context per check at the project breakpoint width and a
+fixed 900 CSS px viewport height, and disposed with the session or the plugin.
+Chromium always launches with its sandbox enabled and the tool never falls back
+to an unsandboxed browser. Missing Chromium and sandbox failures are reported
+explicitly. Configure an executable with
+`DSH_DESIGN_CHROMIUM_PATH` (or `PLAYWRIGHT_CHROMIUM_PATH`), or install the
+browser matching the installed `playwright-core`:
+
+```sh
+pnpm exec playwright install chromium
+```
 
 ## Development notes
 
@@ -116,6 +186,15 @@ Design files in a target repository are versioned sources: `design/design.json`,
   install of that local tarball; a direct Git URL install is not claimed.
 - The bundle deliberately imports no `@deepseek-ai/*` runtime module, so a
   public checkout installs with plain `pnpm install`.
+- Fixtures and journeys are read on every project load, participate in the
+  watcher fingerprint, and report diagnostics through the same file/screen
+  scopes and automatic edit summaries as screens.
+- Browser checks reuse the existing self-contained deterministic document, bind
+  a synthetic local origin, fulfill only that document, and block every other
+  request and service worker.
+- Named states and fixture expansions are validated before they reach the
+  renderer; repeated ids derive from the list id, fixture key, and template
+  identity, never from array position.
 - The design preset copies DSH's shipped `standard` composition; a drift test
   compares it when `DSH_CHECKOUT` points at a DSH checkout.
 - Verification evidence from the implementation run is in

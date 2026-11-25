@@ -88,7 +88,11 @@ export function List({ node, children }: DesignComponentProps) {
 /** List row. */
 export function ListItem({ node, children }: DesignComponentProps) {
   const pressable = useInteraction(node, 'onPress') !== undefined
+  const bare = useBooleanProp(node, 'bare') === true
   const act = useAct(node, 'onPress')
+  const surface = bare
+    ? { padding: 0, borderRadius: 0, background: 'transparent', border: 'none' }
+    : { padding: '10px 12px', borderRadius: RADIUS, background: SURFACE, border: '1px solid ' + BORDER }
   return (
     <div
       {...nodeAttributes(node)}
@@ -96,10 +100,7 @@ export function ListItem({ node, children }: DesignComponentProps) {
       tabIndex={pressable ? 0 : undefined}
       onClick={pressable ? act : undefined}
       style={{
-        padding: '10px 12px',
-        borderRadius: RADIUS,
-        background: SURFACE,
-        border: '1px solid ' + BORDER,
+        ...surface,
         ...useSurfaceStyle(node),
         ...(pressable ? { cursor: 'pointer' } : {}),
       }}

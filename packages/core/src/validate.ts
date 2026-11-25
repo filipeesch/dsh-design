@@ -1,6 +1,7 @@
 /** Semantic validation of a parsed screen against kit metadata, tokens, and the project. */
 import { nearest } from './diagnostics.ts'
 import { parseCssDeclarations } from './css.ts'
+import { isFixtureRef, isInteraction, isItemRef, isReference } from './refs.ts'
 import { propsOf, type ComponentMeta, type KitMetadata, type PropMeta } from './metadata.ts'
 import type {
   DesignChild,
@@ -32,14 +33,12 @@ const LITERAL_PATTERNS: Readonly<Record<string, RegExp>> = {
   shadow: /(?:^|\s)\d+(?:\.\d+)?(?:px|rem)/,
 }
 
-/** Whether a value is one parsed interaction reference. */
-export function isInteraction(value: unknown): value is InteractionRef {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) && '$interaction' in value
-}
+/** Re-exported for callers that classify parsed values. */
+export { isInteraction }
 
 /** Whether a value is a responsive object keyed by breakpoint. */
 export function isResponsiveObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) && !isInteraction(value)
+  return value !== null && typeof value === 'object' && !Array.isArray(value) && !isReference(value)
 }
 
 /** Whether a string is a plausible raw CSS literal rather than a token path. */
@@ -218,6 +217,18 @@ function validatePropValue(
   value: unknown,
   ctx: ValidationContext,
 ): void {
+  if (isFixtureRef(value) || isItemRef(value)) {
+    push(
+      diagnostics,
+      node,
+      file,
+      'error',
+      'reference-unresolved',
+      `Prop "${prop.name}" contains a ${isFixtureRef(value) ? 'fixture' : 'template'} reference that was not resolved before validation.`,
+      'Fixtures are resolved on load; references are only valid in documented collection bindings.',
+    )
+    return
+  }
   if (prop.kind === 'event') {
     if (!isInteraction(value)) {
       push(

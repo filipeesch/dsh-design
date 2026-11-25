@@ -1,0 +1,8 @@
+<Screen id="confirmation" title="Confirmation">
+  <Header title="Order placed" />
+  <Stack gap="spacing.md" padding="spacing.lg" background="color.canvas">
+    <Text id="thanks" variant="heading">Thanks for trying the synthetic flow.</Text>
+    <Text color="color.text">No payment was taken and no real data was used.</Text>
+    <Button id="back-to-catalog" variant="secondary" onPress={navigate("catalog")}>Back to catalog</Button>
+  </Stack>
+</Screen>

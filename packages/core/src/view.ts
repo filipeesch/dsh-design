@@ -1,5 +1,5 @@
 /** Compact text projection of a design screen for the `design_view` tool. */
-import { isInteraction } from './validate.ts'
+import { formatReference, isReference } from './refs.ts'
 import type { DesignChild, DesignElement, DesignPropValue, DesignScreenNode } from './types.ts'
 
 /** Options for the text projection. */
@@ -8,8 +8,10 @@ export interface ViewOptions {
   readonly depth?: number
   /** Render only this node's subtree. */
   readonly node?: string
-  /** Expand overlay children instead of marking them closed. */
+  /** Expand every overlay child instead of marking it closed. */
   readonly openOverlays?: boolean
+  /** Overlay ids to expand, for example a selected named state. */
+  readonly openIds?: readonly string[]
 }
 
 /** Result of a projection. */
@@ -39,7 +41,7 @@ export function findNode(
 
 /** Format one prop value for the projection. */
 function formatValue(value: DesignPropValue): string {
-  if (isInteraction(value)) return `${value.$interaction}("${value.target}")`
+  if (isReference(value)) return formatReference(value)
   return JSON.stringify(value)
 }
 
@@ -59,7 +61,7 @@ function elementLine(
     .join('')
   const text = node.children
     .filter((child): child is Extract<DesignChild, { kind: 'text' }> => child.kind === 'text')
-    .map((child) => child.value)
+    .map((child) => (child.itemField === undefined ? child.value : 'item("' + child.itemField + '")'))
     .join(' ')
   const suffix = text.length === 0 ? '' : ` "${text}"`
   const marker = closed ? ' (closed)' : truncated ? ' …' : ''
@@ -86,7 +88,11 @@ export function projectScreen(root: DesignElement | DesignScreenNode, options: V
   const visit = (node: DesignChild | DesignScreenNode, depth: number, forceOpen: boolean): void => {
     if (node.kind === 'text') return
     const isOverlay = OVERLAY_TYPES.has(node.type)
-    const closed = isOverlay && !options.openOverlays && !forceOpen
+    const closed =
+      isOverlay &&
+      !options.openOverlays &&
+      !forceOpen &&
+      !(node.id !== undefined && (options.openIds ?? []).includes(node.id))
     const truncated = depth >= maxDepth && node.children.some((child) => child.kind === 'element')
     lines.push(elementLine(node, depth, closed, truncated))
     if (closed || truncated) return

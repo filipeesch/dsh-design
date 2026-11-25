@@ -7,11 +7,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { chromium, type Browser, type Page } from 'playwright-core'
 import { parseScreen } from '../../core/src/parse.ts'
 import { deterministicDocument } from '../../host/src/deterministic.ts'
+import type { NamedState } from '@filipeesch/dsh-design-core'
 import type { ProjectPayload, WireScreen } from '../src/wire.ts'
 
 const dist = new URL('../dist/', import.meta.url).pathname
 
-function screen(id: string, source: string): WireScreen {
+function screen(id: string, source: string, states?: readonly NamedState[]): WireScreen {
   const parsed = parseScreen(source, 'screens/' + id + '.dsx')
   return {
     id,
@@ -21,6 +22,7 @@ function screen(id: string, source: string): WireScreen {
     diagnostics: parsed.diagnostics,
     errors: 0,
     warnings: 0,
+    ...(states === undefined ? {} : { states }),
   }
 }
 
@@ -28,6 +30,30 @@ const homeSource =
   '<Screen id="home" title="Home"><Header title="Home" /><Stack gap="spacing.md"><Text>Home screen</Text><Button id="go-checkout" onPress={navigate("checkout")}>Go checkout</Button></Stack></Screen>'
 const checkoutSource =
   '<Screen id="checkout" title="Checkout"><Header title="Checkout" /><Stack gap="spacing.md"><Stack id="styled" css="border-left: 4px solid rgb(255, 0, 0)" gap="spacing.sm"><Text>Styled card</Text><Image src="images/pixel.png" alt="Pixel" height="8px" /></Stack><Button id="open-filters" onPress={open("filters")}>Filters</Button><Tabs id="tabs"><Tab id="one" label="One" value="one"><Text>First panel</Text></Tab><Tab id="two" label="Two" value="two"><Text>Second panel</Text></Tab></Tabs></Stack><Drawer id="filters" title="Filters"><Text>Drawer body</Text></Drawer></Screen>'
+const statedSource =
+  '<Screen id="stated" title="Stated" states={{ "filter-open": { open: ["filters"], tabs: { tabs: "two" } } }}><Header title="Stated" /><Stack gap="spacing.md"><Input id="search" label="Search" /><Tabs id="tabs"><Tab id="one" label="One" value="one"><Text>First panel</Text></Tab><Tab id="two" label="Two" value="two"><Text>Second panel</Text></Tab></Tabs><Button id="open-filters" onPress={open("filters")}>Filters</Button></Stack><Drawer id="filters" title="Filters"><Text>Drawer body</Text></Drawer></Screen>'
+const statedStates: readonly NamedState[] = [
+  {
+    name: 'filter-open',
+    source: { file: 'screens/stated.dsx', line: 1, column: 1 },
+    open: ['filters'],
+    tabs: { tabs: 'two' },
+    values: { search: 'seeded' },
+  },
+]
+const reconcileSource = (order: readonly string[]): string =>
+  '<Screen id="reconcile" title="Reconcile"><Stack gap="spacing.md"><Input id="search" label="Search" /><List id="orders-list" gap="spacing.sm">' +
+  order.map((id) => '<ListItem id="orders-list-' + id + '"><Text>' + id + '</Text></ListItem>').join('') +
+  '</List><Button id="open-filters" onPress={open("filters")}>Filters</Button></Stack><Drawer id="filters" title="Filters"><Text>Drawer body</Text></Drawer></Screen>'
+
+function allScreens(revision: number, reconcile: readonly string[] = ['order-1', 'order-2']): ProjectPayload {
+  return payload(revision, [
+    screen('home', homeSource),
+    screen('checkout', checkoutSource),
+    screen('stated', statedSource, statedStates),
+    screen('reconcile', reconcileSource(reconcile)),
+  ])
+}
 
 function payload(revision: number, screens: WireScreen[], projectError?: string): ProjectPayload {
   return {
@@ -95,7 +121,12 @@ const chromiumPath = await findChromium()
 let server: Server | undefined
 let browser: Browser | undefined
 let base = ''
-let current: ProjectPayload = payload(1, [screen('home', homeSource), screen('checkout', checkoutSource)])
+let current: ProjectPayload = payload(1, [
+  screen('home', homeSource),
+  screen('checkout', checkoutSource),
+  screen('stated', statedSource, statedStates),
+  screen('reconcile', reconcileSource(['order-1', 'order-2'])),
+])
 const streams = new Set<import('node:http').ServerResponse>()
 
 function publish(next: ProjectPayload): void {
@@ -397,6 +428,85 @@ describe('real browser preview regressions', async () => {
         } finally {
           await page.context().close()
         }
+      }
+    },
+  )
+
+  it.skipIf(chromiumPath === undefined)(
+    'applies a named state on direct links, keeps it across breakpoints, and reapplies it on history',
+    async () => {
+      current = allScreens(10)
+      const page = await pageAt({ width: 390, height: 844 }, '/design/session-test/stated?bp=mobile&state=filter-open')
+      try {
+        expect(await page.locator('.dsx-shell').getAttribute('data-dsx-state')).toBe('filter-open')
+        expect(await page.locator('.dsx-frame').getAttribute('data-breakpoint')).toBe('mobile')
+        await page.getByRole('dialog').waitFor({ state: 'visible' })
+        expect(await page.getByText('Second panel').count()).toBe(1)
+        expect(await page.locator('[data-dsx-id="search"] input').inputValue()).toBe('seeded')
+        await page.keyboard.press('Escape')
+        await page.waitForFunction(() => document.querySelector('[role="dialog"]') === null)
+        await page.getByRole('button', { name: /desktop/ }).click()
+        await page.waitForURL('**/design/session-test/stated?bp=desktop&state=filter-open')
+        await page.waitForTimeout(150)
+        expect(await page.locator('.dsx-frame').getAttribute('data-breakpoint')).toBe('desktop')
+        expect(await page.locator('[role="dialog"]').count()).toBe(0)
+        await page.getByRole('button', { name: 'home', exact: true }).click()
+        await page.waitForURL('**/design/session-test/home?bp=desktop')
+        await page.goBack()
+        await page.waitForURL('**/design/session-test/stated?bp=desktop&state=filter-open')
+        await page.getByRole('dialog').waitFor({ state: 'visible' })
+        await page.reload({ waitUntil: 'domcontentloaded' })
+        await page.waitForSelector('.dsx-frame')
+        await page.getByRole('dialog').waitFor({ state: 'visible' })
+      } finally {
+        await page.context().close()
+      }
+    },
+  )
+
+  it.skipIf(chromiumPath === undefined)(
+    'shows an explicit diagnostic for an unknown state and does not apply it',
+    async () => {
+      current = allScreens(11)
+      const page = await pageAt({ width: 390, height: 844 }, '/design/session-test/stated?bp=mobile&state=ghost')
+      try {
+        expect(await page.locator('.dsx-shell').getAttribute('data-dsx-state-error')).toBe('1')
+        expect(await page.getByText('Unknown state').count()).toBe(1)
+        expect(await page.getByText(/not declared for screen/).count()).toBe(1)
+        expect(await page.locator('[role="dialog"]').count()).toBe(0)
+      } finally {
+        await page.context().close()
+      }
+    },
+  )
+
+  it.skipIf(chromiumPath === undefined)(
+    'reconciles fixture-like rows and named state with owner interaction on hot reload',
+    async () => {
+      current = allScreens(12)
+      const page = await pageAt({ width: 390, height: 844 }, '/design/session-test/reconcile?bp=mobile')
+      try {
+        expect(await page.locator('[data-dsx-id="orders-list-order-1"]').count()).toBe(1)
+        await page.locator('[data-dsx-id="search"] input').fill('kept')
+        await page.getByRole('button', { name: 'Filters' }).click()
+        await page.getByRole('dialog').waitFor({ state: 'visible' })
+        current = allScreens(13, ['order-2', 'order-1'])
+        publish(current)
+        await page.waitForFunction(
+          () => document.querySelector('[data-dsx-id="orders-list"]')?.textContent?.startsWith('order-2') === true,
+        )
+        expect(await page.locator('[data-dsx-id="orders-list-order-1"]').count()).toBe(1)
+        expect(await page.locator('[data-dsx-id="orders-list-order-2"]').count()).toBe(1)
+        expect(await page.locator('[data-dsx-id="search"] input').inputValue()).toBe('kept')
+        await page.getByText('Drawer body').waitFor({ state: 'visible' })
+        current = allScreens(14, ['order-1'])
+        publish(current)
+        await page.waitForFunction(() => document.querySelector('[data-dsx-id="orders-list-order-2"]') === null)
+        expect(await page.locator('[data-dsx-id="orders-list-order-1"]').count()).toBe(1)
+        expect(await page.locator('[data-dsx-id="search"] input').inputValue()).toBe('kept')
+        await page.getByText('Drawer body').waitFor({ state: 'visible' })
+      } finally {
+        await page.context().close()
       }
     },
   )

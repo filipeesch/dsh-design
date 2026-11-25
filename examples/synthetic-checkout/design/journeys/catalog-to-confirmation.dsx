@@ -1,0 +1,12 @@
+<Journey id="catalog-to-confirmation" start="catalog" breakpoint="mobile">
+  <ExpectVisible target="products-list" visible={true} />
+  <ExpectCount target="products-list" count={1} />
+  <Tap target="open-cart" />
+  <ExpectScreen screen="checkout" />
+  <Type target="email" value="ada@example.com" />
+  <Choose target="plan" value="pro" />
+  <ExpectValue target="plan" value="pro" />
+  <Tap target="place-order" />
+  <ExpectScreen screen="confirmation" />
+  <ExpectVisible target="thanks" visible={true} />
+</Journey>

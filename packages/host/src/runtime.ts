@@ -36,14 +36,21 @@ export async function fingerprintFolder(folder: string): Promise<FolderFingerpri
     }
   }
   for (const name of SOURCE_FILES) await record(join(folder, name), name)
-  try {
-    const entries = await readdir(join(folder, 'screens'), { withFileTypes: true })
-    for (const entry of entries) {
-      if (entry.isFile() && entry.name.endsWith('.dsx'))
-        await record(join(folder, 'screens', entry.name), 'screens/' + entry.name)
+  const sourceDirectories: readonly (readonly [string, string])[] = [
+    ['screens', '.dsx'],
+    ['fixtures', '.json'],
+    ['journeys', '.dsx'],
+  ]
+  for (const [directory, extension] of sourceDirectories) {
+    try {
+      const entries = await readdir(join(folder, directory), { withFileTypes: true })
+      for (const entry of entries) {
+        if (entry.isFile() && entry.name.endsWith(extension))
+          await record(join(folder, directory, entry.name), directory + '/' + entry.name)
+      }
+    } catch {
+      // A missing optional directory is a valid empty set.
     }
-  } catch {
-    // A missing screens directory is a valid empty project.
   }
   return result
 }

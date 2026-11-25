@@ -1,0 +1,17 @@
+[
+  {
+    "id": "aurora-lamp",
+    "name": "Aurora Desk Lamp",
+    "price": "EUR 48"
+  },
+  {
+    "id": "nimbus-notebook",
+    "name": "Nimbus Notebook",
+    "price": "EUR 12"
+  },
+  {
+    "id": "harbor-tray",
+    "name": "Harbor Tray",
+    "price": "EUR 19"
+  }
+]

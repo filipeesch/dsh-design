@@ -1,0 +1,10 @@
+[
+  {
+    "id": "basic",
+    "label": "Standard delivery"
+  },
+  {
+    "id": "pro",
+    "label": "Express delivery"
+  }
+]

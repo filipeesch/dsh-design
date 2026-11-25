@@ -13,7 +13,7 @@ import { DesignEnvironmentContext, type DesignEnvironment } from '@filipeesch/ds
 import { fetchProject, subscribeRevisions } from './api.ts'
 import { renderNode } from './interpreter.tsx'
 import { getRoute, navigateRoute, selectBreakpoint, useRoute } from './route.ts'
-import { emptyState, filterState, loadState, saveState, type PreviewState } from './state.ts'
+import { emptyState, filterState, loadState, saveState, seedState, type PreviewState } from './state.ts'
 import type { ProjectPayload, WireScreen } from './wire.ts'
 
 /** Clock value used in deterministic mode. */
@@ -41,6 +41,7 @@ export function App() {
   const [ready, setReady] = useState(bootstrap !== undefined)
   const revision = useRef(bootstrap?.revision ?? -1)
   const lastTrees = useRef(new Map<string, DesignScreenNode>())
+  const appliedSeed = useRef<string | undefined>(undefined)
 
   const updateProject = useCallback((next: ProjectPayload) => {
     setProject(next)
@@ -123,6 +124,21 @@ export function App() {
   const retainedRoot =
     activeScreen === undefined ? undefined : (activeScreen.lastValidRoot ?? lastTrees.current.get(activeScreen.id))
   const tree = projectFatal || missingScreen ? undefined : (currentRoot ?? retainedRoot)
+  const screenStates = activeScreen?.states ?? []
+  const unknownState = route.state !== undefined && !screenStates.some((candidate) => candidate.name === route.state)
+
+  // A named state seeds only on a screen/state route transition, never on a
+  // breakpoint change or a valid hot reload that leaves the route unchanged.
+  useEffect(() => {
+    if (!ready || screenId === undefined) return
+    const key = screenId + '|' + (route.state ?? '')
+    if (appliedSeed.current === key) return
+    appliedSeed.current = key
+    if (route.state === undefined) return
+    const named = screenStates.find((candidate) => candidate.name === route.state)
+    if (named === undefined) return
+    setState((current) => seedState(current, screenId, named))
+  }, [ready, screenId, route.state, screenStates])
 
   const imageUrl = useCallback(
     (path: string) => {
@@ -257,6 +273,8 @@ export function App() {
       data-dsx-session={session}
       data-dsx-deterministic={route.deterministic ? '1' : undefined}
       data-dsx-clock={route.deterministic ? String(FIXED_TIME) : undefined}
+      data-dsx-state={route.state}
+      data-dsx-state-error={unknownState ? '1' : undefined}
     >
       <header className="dsx-chrome">
         <div className="dsx-brand">Design preview</div>
@@ -282,9 +300,7 @@ export function App() {
               key={candidate.name}
               type="button"
               className={candidate.name === breakpointName ? 'active' : ''}
-              onClick={() =>
-                screenId === undefined ? selectBreakpoint(candidate.name) : navigateRoute(screenId, candidate.name)
-              }
+              onClick={() => selectBreakpoint(candidate.name)}
             >
               {candidate.name}
               <small>{candidate.width}px</small>
@@ -298,6 +314,14 @@ export function App() {
         </div>
       </header>
       <main className="dsx-stage">
+        {unknownState ? (
+          <div className="dsx-notice error" role="alert">
+            <strong>Unknown state</strong>
+            <p>
+              State "{route.state}" is not declared for screen "{screenId ?? ''}". No state was applied.
+            </p>
+          </div>
+        ) : null}
         {missingScreen ? (
           <div className="dsx-notice" role="alert">
             Screen "{route.screen}" no longer exists in this project.

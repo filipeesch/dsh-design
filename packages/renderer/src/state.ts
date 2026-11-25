@@ -1,4 +1,5 @@
 /** Preview interaction state keyed by screen and node id. */
+import type { NamedState } from '@filipeesch/dsh-design-core'
 import type { ProjectPayload } from './wire.ts'
 import { collectIds } from './wire.ts'
 
@@ -67,4 +68,27 @@ export function filterState(state: PreviewState, project: ProjectPayload): Previ
     tabs: pick(state.tabs),
     values: pick(state.values),
   }
+}
+/**
+ * Apply one named state to a screen scope, replacing that screen's interaction
+ * state with the declared starting point. Other screens are left untouched.
+ */
+export function seedState(state: PreviewState, screen: string, named: NamedState): PreviewState {
+  const prefix = screen + '/'
+  const openOverlays: Record<string, true> = {}
+  for (const [key, value] of Object.entries(state.openOverlays)) {
+    if (!key.startsWith(prefix)) openOverlays[key] = value
+  }
+  for (const id of named.open) openOverlays[prefix + id] = true
+  const tabs: Record<string, string> = {}
+  for (const [key, value] of Object.entries(state.tabs)) {
+    if (!key.startsWith(prefix)) tabs[key] = value
+  }
+  for (const [id, value] of Object.entries(named.tabs)) tabs[prefix + id] = value
+  const values: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(state.values)) {
+    if (!key.startsWith(prefix)) values[key] = value
+  }
+  for (const [id, value] of Object.entries(named.values)) values[prefix + id] = value
+  return { openOverlays, tabs, values }
 }

@@ -27,6 +27,9 @@ export async function createHarness(
     assetsDir?: string
     folderName?: string
     effectiveCwd?: (session: any) => string | undefined
+    assetsDir?: string
+    chromiumPath?: string
+    browserTimeoutMs?: number
   } = {},
 ): Promise<HostHarness> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-design-host-'))
@@ -88,7 +91,14 @@ export async function createHarness(
       return () => undefined
     },
   }
-  applyHost(ctx, { folderName: options.folderName ?? 'design', debounceMs: 10, idleStopMs: 50 })
+  applyHost(ctx, {
+    folderName: options.folderName ?? 'design',
+    debounceMs: 10,
+    idleStopMs: 50,
+    ...(options.assetsDir === undefined ? {} : { assetsDir: options.assetsDir }),
+    ...(options.chromiumPath === undefined ? {} : { chromiumPath: options.chromiumPath }),
+    ...(options.browserTimeoutMs === undefined ? {} : { browserTimeoutMs: options.browserTimeoutMs }),
+  })
   const service = ctx.design as DesignService
   applyTools(ctx)
   const route = createRouteHandler(service.registry, options.assetsDir)

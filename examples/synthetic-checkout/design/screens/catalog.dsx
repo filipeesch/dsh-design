@@ -1,0 +1,19 @@
+<Screen id="catalog" title="Catalog">
+  <Header title="Nimbus Supply" subtitle="Fictitious demo catalog" />
+  <Stack gap="spacing.lg" padding="spacing.lg" background="color.canvas">
+    <Text variant="title">Everyday desk goods</Text>
+    <Text color="color.text">Synthetic products only. No real customer or production data.</Text>
+    <List id="products-list" items={fixture("products")} gap="spacing.sm">
+      <ItemTemplate>
+        <Card padding="spacing.md" background="color.surface" radius="radius.md">
+          <Stack gap="spacing.xs">
+            <Text variant="heading">{item("name")}</Text>
+            <Text variant="caption" color="color.text">{item("price")}</Text>
+          </Stack>
+        </Card>
+      </ItemTemplate>
+    </List>
+    <Table columns={[{ label: "Product", field: "name" }, { label: "Price", field: "price" }]} rows={fixture("products")} />
+    <Button id="open-cart" variant="primary" size="lg" onPress={navigate("checkout")}>Review order</Button>
+  </Stack>
+</Screen>

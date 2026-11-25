@@ -15,9 +15,27 @@ export interface InteractionRef {
   readonly target: string
 }
 
+/** One declarative fixture binding, for example `fixture("orders")`. */
+export interface FixtureRef {
+  readonly $fixture: string
+}
+
+/** One declarative template field reference, for example `item("name")`. */
+export interface ItemRef {
+  readonly $item: string
+}
+
 /** Value stored on a design node after parsing. */
 export type DesignPropValue =
-  string | number | boolean | null | InteractionRef | DesignPropValue[] | { [key: string]: DesignPropValue }
+  | string
+  | number
+  | boolean
+  | null
+  | InteractionRef
+  | FixtureRef
+  | ItemRef
+  | DesignPropValue[]
+  | { [key: string]: DesignPropValue }
 
 /** Props by name, in source order. */
 export type DesignProps = Record<string, DesignPropValue>
@@ -42,11 +60,13 @@ export interface StructuralAddress {
   readonly label: string
 }
 
-/** Literal text child of a design node. */
+/** Literal text child of a design node, or a template field placeholder. */
 export interface DesignText {
   readonly kind: 'text'
   readonly value: string
   readonly source: SourceLocation
+  /** Template field whose value replaces this text during fixture expansion. */
+  readonly itemField?: string
 }
 
 /** Shared shape of every design element. */
@@ -60,6 +80,8 @@ export interface DesignElement {
   readonly children: readonly DesignChild[]
   readonly source: SourceLocation
   readonly address: StructuralAddress
+  /** Source position of each attribute, used for metadata diagnostics. */
+  readonly propLocations?: Readonly<Record<string, SourceLocation>>
 }
 
 /** A parsed design screen; `type` is always `Screen`. */
@@ -71,6 +93,8 @@ export interface DesignScreenNode {
   readonly children: readonly DesignChild[]
   readonly source: SourceLocation
   readonly address: StructuralAddress
+  /** Source position of each attribute, used for metadata diagnostics. */
+  readonly propLocations?: Readonly<Record<string, SourceLocation>>
 }
 
 /** One child of a design node. */
@@ -147,6 +171,20 @@ export interface ProjectScreen {
   readonly diagnostics: readonly Diagnostic[]
   /** Last tree that validated without errors; undefined when none did. */
   readonly lastValidRoot?: DesignScreenNode
+  /** Validated named states belonging to the current (or last valid) tree. */
+  readonly states: readonly NamedState[]
+}
+
+/** One value assignable by a named screen state. */
+export type DesignStateValue = string | number | boolean | readonly string[]
+
+/** One validated named screen state. */
+export interface NamedState {
+  readonly name: string
+  readonly open: readonly string[]
+  readonly tabs: Readonly<Record<string, string>>
+  readonly values: Readonly<Record<string, DesignStateValue>>
+  readonly source: SourceLocation
 }
 
 /** A loaded and validated design project. */
@@ -158,6 +196,64 @@ export interface DesignProject {
   readonly diagnostics: readonly Diagnostic[]
   /** Alphabetically first screen id, used when config.entry is absent. */
   readonly entry: string | undefined
+  /** Validated project-local fixture collections. */
+  readonly fixtures: Readonly<Record<string, FixtureCollection>>
+  /** Parsed journey files, including invalid ones and their diagnostics. */
+  readonly journeys: readonly ProjectJourney[]
+}
+
+/** One fixture item: a stable key and flat scalar fields. */
+export interface FixtureItem {
+  readonly id: string
+  readonly fields: Readonly<Record<string, string | number | boolean>>
+}
+
+/** One validated fixture collection read from `fixtures/<id>.json`. */
+export interface FixtureCollection {
+  readonly id: string
+  readonly file: string
+  readonly items: readonly FixtureItem[]
+}
+
+/** All fixture collections of a project. */
+export type FixtureCollections = Readonly<Record<string, FixtureCollection>>
+
+/** One journey action or assertion, in source order. */
+export type JourneyStep =
+  | { readonly kind: 'tap'; readonly target: string; readonly source: SourceLocation }
+  | { readonly kind: 'type'; readonly target: string; readonly value: string; readonly source: SourceLocation }
+  | { readonly kind: 'choose'; readonly target: string; readonly value: string; readonly source: SourceLocation }
+  | { readonly kind: 'navigate'; readonly screen: string; readonly source: SourceLocation }
+  | { readonly kind: 'expect-screen'; readonly screen: string; readonly source: SourceLocation }
+  | {
+      readonly kind: 'expect-visible'
+      readonly target: string
+      readonly visible: boolean
+      readonly source: SourceLocation
+    }
+  | { readonly kind: 'expect-value'; readonly target: string; readonly value: string; readonly source: SourceLocation }
+  | { readonly kind: 'expect-count'; readonly target: string; readonly count: number; readonly source: SourceLocation }
+
+/** One parsed journey file. */
+export interface ParsedJourney {
+  readonly file: string
+  readonly journey?: {
+    readonly id: string
+    readonly start: string
+    readonly state?: string
+    readonly breakpoint?: string
+    readonly steps: readonly JourneyStep[]
+    readonly source: SourceLocation
+  }
+  readonly diagnostics: readonly Diagnostic[]
+}
+
+/** One journey in a loaded project, parsed and validated. */
+export interface ProjectJourney {
+  readonly file: string
+  readonly id: string
+  readonly journey?: ParsedJourney['journey']
+  readonly diagnostics: readonly Diagnostic[]
 }
 
 /** One unresolved token before alias expansion. */

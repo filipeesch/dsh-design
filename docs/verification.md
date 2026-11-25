@@ -1,144 +1,247 @@
 # Verification evidence
 
-Checks run while implementing and reworking `add-design-foundation`. Paths are
-portable placeholders; machine-local sample data is not part of the repository.
+Checks run while implementing `add-design-journeys-and-checks` on top of the
+`add-design-foundation` baseline. Paths are portable placeholders; no owner
+token, real session id, temporary home, or machine-specific path is recorded.
 
 ## Quality gate
 
 ```sh
 pnpm install
-pnpm -r build
-pnpm -r test
 pnpm run check
-openspec validate add-design-foundation --strict
+openspec validate add-design-journeys-and-checks --strict
+pnpm run pack:bundle
 ```
 
-`pnpm -r build` and `pnpm -r test` exit 0. `pnpm run check` (TypeScript build,
-compile-time type tests, ESLint, Prettier, EOF-newline check, Vitest) passes.
-`openspec validate --strict` reports `Change 'add-design-foundation' is valid`.
+Results:
 
-## Durable test coverage
+- `pnpm run check` exits 0: TypeScript build, compile-time type tests, ESLint,
+  Prettier, EOF-newline check, and Vitest all pass.
+- Vitest: 14 files, 163 tests passed. The real Chromium suites ran (they skip
+  only when no browser is available).
+- `openspec validate add-design-journeys-and-checks --strict` reports
+  `Change 'add-design-journeys-and-checks' is valid`.
+- `pnpm run pack:bundle` writes
+  `dist/filipeesch-dsh-design-bundle-0.1.0.tgz` (about 1.1 MB; sha256
+  `e26c5cbb83650f165dd446475f27a3e925b32102c10e157012ff4aefce77d8cf`). The
+  packed manifest declares `playwright-core ^1.65.1`; `lib/host.js` keeps
+  `playwright-core` external so the installed profile resolves it.
 
-- parser allowlist, rejected JavaScript corpus, untouched-evaluation check;
-- validation rules, suggestions, CSS/image policy, responsive values, interactions;
-- tokens, aliases, cycles, config defaults, duplicate screens, kit pin, fatal
-  parse identity, cold-invalid -> invalid -> valid retention using only a
-  previously validated `lastValidRoot`;
-- scaffolding refusal inside `scaffoldProject` before side effects, exclusive
-  config claim, child-directory validation before the claim, exclusive open
-  separated from write with immediate ownership registration, rollback of
-  partially written config and sibling files, closed handles, injected-I/O
-  failure retry, screens-conflict retry, concurrent-call winner,
-  symlink-folder rejection, no-write on existing config, configured folder
-  names and safe-segment confinement;
-- kit metadata for every component, example rendering, semantic roles, classes;
-- tab/select/toggle/drawer behavior, backdrop, Escape, focus restoration;
-- modal focus trapping at phone and desktop, background focus rejection, and
-  focus after reload;
-- preview route source, deep links, Back/Forward, breakpoint URLs;
-- state filtering and error overlay; project-level render blocking;
-- host owner-principal denial (403), owner path, passive media allowlist,
-  signature sniffing, traversal/symlink confinement, assets separation;
-- project registry sharing, two repositories, revision counter, parse cache;
-- tools `design_init/status/validate/view/catalog`, configured folder,
-  effective cwd, existing-config no-write;
-- automatic validation for edit/write/shell and nested `run_code` aggregation;
-- preset prompt size and standard-composition drift with `DSH_CHECKOUT`;
-- activation diagnostic when `webServer` is unavailable;
-- static renderer references only relative resources;
-- real Chromium regressions for mobile/desktop geometry, Back/Forward, deep
-  links, focus, overlay confinement, visible node CSS, bundled font,
-  deterministic self-contained delivery and fatal break/repair.
+## Durable coverage added
 
-## Real Chromium regression
+- Named states: typed extraction, overlay/tab/value validation, duplicate names,
+  incompatible or missing targets, cold-invalid and last-valid retention,
+  stripped render props.
+- Fixtures: bounded JSON loading, unique item ids, flat scalar fields, duplicate
+  and missing diagnostics, empty collections, list/table/select normalization,
+  key-stable ids across reordering, inline list content preserved, invalid
+  binding/conflict diagnostics, deterministic expansion.
+- Journeys: typed step parsing, source-located diagnostics for unknown steps,
+  expressions, invalid arguments, missing screens/states/targets, duplicate ids,
+  browser-free validation.
+- Preview: `?state=` deep links, one-time seeding per screen/state transition,
+  no reseed on breakpoint changes, history reapplication, unknown-state
+  diagnostic, hot-reload reconciliation of rows and owner interaction.
+- Browser pool: lazy launch, one shared cold-start launch per session, live and
+  in-flight launches counted against the cap, busy/queued sessions never
+  evicted, admission/queue/launch cancellation and deadlines, late contexts and
+  browsers closed, pending launches drained on session and plugin disposal,
+  retiring browser/launch reservations retained until close resolves,
+  unlinked retirements drained by `disposeAll`, capacity-only admissions tied to
+  session generations (disposing rejects them; fresh work may start a new
+  generation), and concurrent cross-session isolation.
+- Browser launch: every check passes `chromiumSandbox: true`, reports the
+  sandboxed-launch guidance on failure, and never falls back to an unsandboxed
+  browser.
+- Cache safety: each `.cache` and `screenshots` component is validated before
+  creation, symlinks are refused, and the canonical directory is rechecked
+  immediately before the atomic write.
+- Preflight and actions: invalid screens are rejected before browser work,
+  navigation and `ExpectScreen` read the committed canvas, and ordinary
+  actionability failures become failed steps with a snapshot.
+- Fixture list semantics: each fixture key gets exactly one bare semantic
+  `ListItem` wrapper, while repeated row and child identities stay key-derived;
+  the installed example reports three listitems.
+- Lint: contained sibling rectangles count as overlap unless they are a
+  structural parent/child pair or an intentional overlay; snapshot and
+  overlap-sample truncation are reported as findings.
+- Screenshot identity: resolved state `open`/`tabs`/`values`, viewport height,
+  breakpoint width, tokens, assets, locale, time zone, and kit version feed the
+  deterministic name, so a changed assignment yields a new path.
+- Headless checks: mobile and desktop measured boxes, canvas/container overflow,
+  clipped text, peer overlap, 44 px tap targets, intentional overlay and
+  ancestor-containment exclusions, passing and failing journeys with
+  first-failure snapshots and no later steps, deterministic highlighted
+  screenshots confined to `design/.cache/screenshots`, and no writes to design
+  sources.
+- Tools: all four new tools registered with typed results, deterministic query
+  ordering, static inspection and query without a browser, and explicit browser
+  unavailability.
+- Preset: under the 6,000-character limit, names the new tools and DSL, keeps
+  fixtures fictitious, and keeps screenshots and checks opt-in.
 
-`packages/renderer/tests/browser.spec.ts` starts a local fixture server and
-launches Chromium when a Playwright browser is available (skip otherwise). It
-verifies:
+## Browser regressions
 
-- 390x844 viewport: canvas exactly 390 px, document scroll width <= 390 px;
-- 1440x900 viewport: desktop canvas exactly 1280 px; mobile canvas on desktop;
-- deep link `/design/<session>/checkout?bp=mobile`, Back, Forward, and the
-  breakpoint picker agree;
-- named drawer: `aria-labelledby` points at the title, focus moves inside,
-  Tab/Shift+Tab stay in the top dialog, background focus is rejected, dialog
-  bounds stay inside `.dsx-frame`, Escape closes, focus returns to the trigger;
-- the same modal trap at 390x844 and 1440x900 and after a reload;
-- node `css` produces visible `border-left: 4px` in computed style;
-- fatal payload (no current root, retained `lastValidRoot`) keeps the previous
-  render and open drawer; repair removes the overlay;
-- deterministic mode: the initial document is the only Chromium request; its
-  project state, renderer, fonts, and raster image are inlined; screen changes
-  and drawer interaction add no requests; identical markup and all element
-  rects on two loads; bundled Inter available via `document.fonts.check`; fixed
-  clock attribute `1700000000000`; CSP contains `connect-src 'none'`.
+`packages/renderer/tests/browser.spec.ts` runs a local fixture server and real
+Chromium when available. In addition to the foundation scenarios it verifies:
 
-## Real DSH and browser E2E
+- named-state direct link with drawer, tab, and input seed;
+- state retained across a breakpoint change, then reapplied after history
+  navigation and a reload;
+- explicit unknown-state diagnostic with no state applied;
+- fixture-like repeated rows keeping key-derived ids after reorder while an
+  entered input value and an open drawer survive compatible hot reloads.
 
-A temporary DSH home/profile was used; the running GUI on port 3080 was never
-touched.
+`packages/host/tests/browser.spec.ts` deterministically exercises the pool races:
+shared cold launch, cap admission with an in-flight launch, busy/queued
+non-eviction, cancellation and deadline at admission/queue/launch, late context
+and browser closure, close-gated eviction and late-launch retirement, draining
+retirements already unlinked from active records, session-generation rejection
+of capacity-only admissions with fresh-generation recovery, disposal draining a
+pending launch, and sandboxed launch options.
 
-- Owner-authenticated preview loaded; anonymous request returned 401;
-- design session called `design_status` and returned its preview URL;
-- mobile canvas 390 px, page scroll checked in a real 390x844 context by the
-  browser suite;
-- node CSS computed `4px rgb(255, 0, 0)`; bundled font reported loaded;
-- drawer focus was inside the dialog, Tab stayed inside the top modal, and the
-  dialog stayed inside the canvas;
-- deterministic preview on the real host returned one self-contained document:
-  the Chromium request log contained only that document, CSP was
-  `connect-src 'none'`, the clock attribute was `1700000000000`, bundled Inter
-  was available, and opening the drawer added no request;
-- breaking `checkout.dsx` with an unclosed tag kept the previous render and the
-  open drawer, with `Showing the last valid render`; repairing it cleared the
-  overlay and kept the drawer;
-- client activation marker `documentElement.dataset.dshDesignClient = "loaded"`
-  was present; no dead sidebar action is registered.
+`packages/host/tests/checks.spec.ts` verifies layout measurements, lint rules
+(including contained siblings as overlap, no false overlap for a parent/child
+or an open dialog, and truncation reporting), passing and failing journeys,
+ordinary actionability failures with snapshots, screenshot determinism and
+confinement (including symlinked cache refusal and state-sensitive names),
+browser reuse and disposal, static tools without a browser, and the runnable
+synthetic example.
+
+## Synthetic example
+
+`examples/synthetic-checkout/design` is a runnable, entirely fictitious project
+with named states, List/Table/Select fixtures, and two journeys. In the test run
+it loads with zero diagnostics, both journeys pass in real Chromium, and catalog
+lint reports zero errors.
+
+```sh
+pnpm run check   # includes the example's load, journey, and lint checks
+```
+
+## Packed install in a disposable real DSH
+
+A throwaway `DSH_HOME` and workspace were used; the live GUI on port 3080 was
+never touched.
+
+```sh
+# 1. Create a disposable profile from the shipped web template.
+DSH_HOME=<temp-home> node <dsh-checkout>/apps/cli/lib/bin.js \
+  --profile <review-profile> --from-default-profile web --dump-config >/dev/null
+
+# 2. Install the packed artifact, not the linked workspace.
+DSH_HOME=<temp-home> node <dsh-checkout>/apps/cli/lib/bin.js \
+  plugin --profile <review-profile> add <checkout>/dist/filipeesch-dsh-design-bundle-0.1.0.tgz
+
+# 3. Copy the synthetic example and add the disposable session harness.
+mkdir -p <temp-workspace>
+cp -R <checkout>/examples/synthetic-checkout/design <temp-workspace>/design
+REVIEW_PATCH=<temp-workspace>/review.patch.yml
+printf '%s\n' \
+  '- insert:' \
+  '    - id: design-review-session' \
+  '      name: <checkout>/docs/review/review-session.mjs' > "$REVIEW_PATCH"
+
+# 4. Boot the real web profile with the review overlay. Set
+#    REVIEW_TOOLS_SMOKE=1 to execute the packed tools, and
+#    DSH_DESIGN_CHROMIUM_PATH to an installed Chromium.
+REVIEW_CWD=<temp-workspace> REVIEW_TOOLS_SMOKE=1 \
+  DSH_DESIGN_CHROMIUM_PATH=<chromium-executable> DSH_HOME=<temp-home> \
+  node <dsh-checkout>/apps/cli/lib/bin.js --profile <review-profile> \
+  --patch "$REVIEW_PATCH" --port <free-port> --no-open
+```
+
+The boot log reported:
+
+```text
+REVIEW_SESSION review-session design
+REVIEW_TOOLS design_catalog,design_init,design_lint,design_query,design_run_journey,design_screenshot,design_status,design_validate,design_view
+REVIEW_TOOL design_lint {"errors":0,"warnings":0,"rules":[]}
+REVIEW_TOOL design_run_journey {"ok":true,"steps":10}
+REVIEW_TOOL design_screenshot {"width":390,"bytes":40611,"cachePath":true}
+REVIEW_TOOL design_view {"breakpoint":"mobile","canvas":{"width":390,"height":723},"nodes":23}
+REVIEW_TOOL design_query {"total":1,"node":"open-cart"}
+REVIEW_TOOLS_SMOKE done
+```
+
+So the packed install boots the real web profile, the design preset is
+available, all nine design tools are registered, and the browser-backed plus
+static tools execute against the synthetic example. The packed dependency
+resolved to `playwright-core 1.65.1` inside the profile. Running the same smoke
+once without a configured Chromium returned the explicit missing-browser/sandbox
+guidance; pointing `DSH_DESIGN_CHROMIUM_PATH` at an installed Chrome for Testing
+made every browser-backed tool pass.
+
+```sh
+# Owner gating: no cookie is refused before content is read.
+curl -s -o /dev/null -w '%{http_code}\n' <origin>/design/review-session/catalog
+# 401
+```
+
+The owner-link browser review (the printed entry URL contains a token and is not
+recorded) used:
+
+```sh
+DSH_ENTRY_URL='<printed owner entry URL>' REVIEW_SESSION=review-session \
+  node <checkout>/docs/review/preview-check.mjs
+```
+
+Output (abridged):
+
+```json
+{
+  "mobile": { "breakpoint": "mobile", "width": 390, "screen": "catalog" },
+  "desktop": {
+    "breakpoint": "desktop",
+    "width": 1280,
+    "screen": "catalog",
+    "requests": ["<origin>/design/review-session/catalog?bp=desktop&deterministic=1"]
+  },
+  "stated": { "breakpoint": "mobile", "width": 390, "screen": "checkout" },
+  "failures": []
+}
+```
+
+Manual observations on the same disposable instance:
+
+- mobile interactive catalog: 390 px canvas, three semantic listitems, fixture
+  list rows and table visible;
+- desktop deterministic catalog: 1280 px canvas, exactly one network request,
+  owner chrome shows `deterministic`;
+- `/checkout?bp=mobile&state=review-open`: review drawer open, email seeded to
+  `ada@example.com`, plan seeded to `pro`, shell reports the state;
+- owner screenshots showed the same rendering; the mobile and desktop captures
+  were byte-identical to the pre-fix run, so the semantic listitem wrapper did
+  not change the accepted UI. Anonymous access returned 401.
 
 ## Install workflows
 
-Linked development checkout:
-
-```sh
-pnpm install
-pnpm run build
-dsh plugin --profile <profile> add link:<checkout>/packages/bundle
-# start DSH: /design/* -> 401 without owner
-dsh plugin --profile <profile> remove @filipeesch/dsh-design-bundle
-# start DSH: /design/* -> 404, design rows gone
-```
-
-Reproducible machine flow (clone -> install -> build -> pack -> install the local artifact):
+Reproducible machine flow (clone, install, build, pack, install):
 
 ```sh
 git clone <repository> <checkout>
 cd <checkout>
 pnpm install
-pnpm run build
+pnpm run check
 pnpm run pack:bundle
 dsh plugin --profile <fresh-profile> add <checkout>/dist/filipeesch-dsh-design-bundle-0.1.0.tgz
-# activation verified through a fresh profile; removal verified the same way
 ```
 
-Both paths were exercised on fresh profiles in this run. The non-link path
-installs the packed local artifact; no direct Git URL install is claimed. No
-release was published.
-
-## Opening the preview for review
+The non-link path installs the packed local artifact. Browser-backed tools need
+a Playwright Chromium matching the installed `playwright-core`, or an operator
+path:
 
 ```sh
-cd <target-app-with-design-folder>
-DSH_HOME=<dsh-home> <dsh-checkout>/apps/cli/bin.js \
-  --profile <profile-with-dsh-design> --port 3091 --no-open
+pnpm exec playwright install chromium
+# or
+export DSH_DESIGN_CHROMIUM_PATH=/path/to/chrome
 ```
 
-Open the printed entry URL once with its `?token=` to set the owner cookie. In
-the DSH GUI create/open a **Design** session; use the preview URL it returns:
+Without one, preview, static validation, `design_view` without a breakpoint, and
+`design_query` keep working, while browser-backed tools return the explicit
+install guidance covered by tests.
 
-```text
-http://127.0.0.1:3091/design/<session-id>/
-http://127.0.0.1:3091/design/<session-id>/<screen-id>?bp=mobile
-http://127.0.0.1:3091/design/<session-id>/<screen-id>?bp=desktop&deterministic=1
-```
+## Cleanup
 
-The route is owner-only and local by design; do not expose the port.
+The disposable server, temp home, temp workspace, review patch, and screenshots
+were removed after the run; the live GUI and DSH checkout were never modified.

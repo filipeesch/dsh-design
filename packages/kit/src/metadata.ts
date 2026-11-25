@@ -425,6 +425,12 @@ const definitions: ComponentMeta[] = [
       padding,
       background,
       { name: 'onPress', kind: 'event', description: 'Interaction reference for a pressable row.' },
+      {
+        name: 'bare',
+        kind: 'boolean',
+        default: false,
+        description: 'Remove the default row surface; used by fixture-backed list wrappers.',
+      },
     ],
     example: '<ListItem>Row</ListItem>',
   }),

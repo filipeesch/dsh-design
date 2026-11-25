@@ -30,5 +30,8 @@
   "scripts": {
     "build": "node ../../scripts/build.mjs --only bundle",
     "test": "vitest run --root ../.. packages/bundle/tests --passWithNoTests"
+  },
+  "dependencies": {
+    "playwright-core": "^1.65.1"
   }
 }

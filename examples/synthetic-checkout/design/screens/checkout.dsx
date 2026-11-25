@@ -1,0 +1,14 @@
+<Screen id="checkout" title="Checkout" states={{ "review-open": { open: ["review-drawer"], values: { email: "ada@example.com", plan: "pro" } } }}>
+  <Header title="Checkout" subtitle="Fictitious sandbox checkout" />
+  <Stack gap="spacing.md" padding="spacing.lg" background="color.canvas">
+    <Input id="email" label="Email" placeholder="you@example.com" type="email" />
+    <Select id="plan" label="Delivery plan" options={fixture("plans")} />
+    <Button id="place-order" variant="primary" size="lg" onPress={navigate("confirmation")}>Place order</Button>
+  </Stack>
+  <Drawer id="review-drawer" title="Order review" side="right">
+    <Stack gap="spacing.sm">
+      <Text>Two synthetic items are ready.</Text>
+      <Button id="close-review" variant="secondary" onPress={close("review-drawer")}>Keep editing</Button>
+    </Stack>
+  </Drawer>
+</Screen>

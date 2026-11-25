@@ -2,18 +2,31 @@
  * Design project discovery and loading.
  *
  * A project is a design folder with `design.json`, `tokens.json`, and
- * `screens/*.dsx`. Loading never writes: derived output belongs to the host
- * under `<design-folder>/.cache/`.
+ * `screens/*.dsx`, plus optional `fixtures/*.json` and `journeys/*.dsx`.
+ * Loading never writes: derived output belongs to the host under
+ * `<design-folder>/.cache/`.
  */
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 import { checkKitVersion, parseConfig } from './config.ts'
 import { countDiagnostics, sortDiagnostics } from './diagnostics.ts'
+import { expandScreen, loadFixtures } from './fixtures.ts'
+import { parseJourney, validateJourney } from './journey.ts'
 import type { KitMetadata } from './metadata.ts'
 import { parseScreen } from './parse.ts'
-import type { ParsedScreen } from './types.ts'
+import { extractNamedStates } from './state.ts'
+import { validateTree } from './validate.ts'
 import { parseTokens } from './tokens.ts'
-import type { DesignProject, DesignScreenNode, Diagnostic, ProjectScreen } from './types.ts'
+import type {
+  DesignProject,
+  DesignScreenNode,
+  Diagnostic,
+  NamedState,
+  ParsedJourney,
+  ParsedScreen,
+  ProjectJourney,
+  ProjectScreen,
+} from './types.ts'
 
 /** Default design folder name inside the session working directory. */
 export const DEFAULT_DESIGN_FOLDER = 'design'
@@ -79,17 +92,27 @@ async function readOptional(path: string): Promise<string | undefined> {
   }
 }
 
-/** List screen files in a design folder, sorted for deterministic output. */
-export async function listScreenFiles(folder: string): Promise<string[]> {
+/** List files in one project subdirectory, sorted for deterministic output. */
+async function listProjectFiles(folder: string, directory: string, extension: string): Promise<string[]> {
   try {
-    const entries = await readdir(join(folder, 'screens'), { withFileTypes: true })
+    const entries = await readdir(join(folder, directory), { withFileTypes: true })
     return entries
-      .filter((entry) => entry.isFile() && entry.name.endsWith('.dsx'))
-      .map((entry) => `screens/${entry.name}`)
+      .filter((entry) => entry.isFile() && entry.name.endsWith(extension))
+      .map((entry) => directory + '/' + entry.name)
       .sort((left, right) => left.localeCompare(right))
   } catch {
     return []
   }
+}
+
+/** List screen files in a design folder, sorted for deterministic output. */
+export async function listScreenFiles(folder: string): Promise<string[]> {
+  return listProjectFiles(folder, 'screens', '.dsx')
+}
+
+/** List journey files in a design folder, sorted for deterministic output. */
+export async function listJourneyFiles(folder: string): Promise<string[]> {
+  return listProjectFiles(folder, 'journeys', '.dsx')
 }
 
 /** Build an empty project for a missing or broken config. */
@@ -101,7 +124,56 @@ function emptyProject(folder: string, diagnostics: Diagnostic[]): DesignProject 
     screens: [],
     diagnostics: sortDiagnostics(diagnostics),
     entry: undefined,
+    fixtures: {},
+    journeys: [],
   }
+}
+
+/** Screen data after fixture expansion and state extraction. */
+interface PreparedScreen {
+  readonly parsed: ParsedScreen
+  readonly root?: DesignScreenNode
+  readonly states: readonly NamedState[]
+  readonly diagnostics: readonly Diagnostic[]
+}
+
+/** Expand one parsed screen, extract its named states, and collect diagnostics. */
+function prepareScreen(parsed: ParsedScreen, fixtures: DesignProject['fixtures'], kit: KitMetadata): PreparedScreen {
+  if (parsed.root === undefined) {
+    return { parsed, states: [], diagnostics: parsed.diagnostics }
+  }
+  const expanded = expandScreen(parsed.root, fixtures, parsed.file)
+  const states = extractNamedStates(expanded.root, parsed.file, kit)
+  return {
+    parsed,
+    root: states.root,
+    states: states.states,
+    diagnostics: [...parsed.diagnostics, ...expanded.diagnostics, ...states.diagnostics],
+  }
+}
+
+/** Duplicate journey ids across files, reported on the later file. */
+function journeyDuplicates(journeys: readonly ParsedJourney[]): Diagnostic[] {
+  const diagnostics: Diagnostic[] = []
+  const seen = new Map<string, string>()
+  for (const parsed of journeys) {
+    const id = parsed.journey?.id
+    if (id === undefined) continue
+    const first = seen.get(id)
+    if (first !== undefined) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'journey-duplicate-id',
+        file: parsed.file,
+        line: parsed.journey?.source.line ?? 1,
+        column: parsed.journey?.source.column ?? 1,
+        message: `Duplicate journey id "${id}" declared in ${first} and ${parsed.file}.`,
+      })
+      continue
+    }
+    seen.set(id, parsed.file)
+  }
+  return diagnostics
 }
 
 /**
@@ -151,6 +223,9 @@ export async function loadProject(options: LoadProjectOptions): Promise<DesignPr
       : parseTokens(tokensSource, 'tokens.json')
   diagnostics.push(...tokens.diagnostics)
 
+  const loadedFixtures = await loadFixtures(folder)
+  diagnostics.push(...loadedFixtures.diagnostics)
+
   const files = await listScreenFiles(folder)
   const parsedScreens = await Promise.all(
     files.map(async (file) => {
@@ -166,15 +241,17 @@ export async function loadProject(options: LoadProjectOptions): Promise<DesignPr
       return parsed
     }),
   )
+  const prepared = parsedScreens.map((parsed) => prepareScreen(parsed, loadedFixtures.collections, kit))
 
   // Collect screen ids first so cross-screen references validate in one pass.
   const previousByFile = new Map((previous?.screens ?? []).map((screen) => [screen.file, screen]))
   const screenIds: string[] = []
   const seen = new Map<string, string>()
   const screenDiagnostics: Diagnostic[] = []
-  for (const parsed of parsedScreens) {
+  for (const candidate of prepared) {
+    const parsed = candidate.parsed
     const previousScreen = previousByFile.get(parsed.file)
-    const declaredId = parsed.root?.id
+    const declaredId = candidate.root?.id
     const id = declaredId === undefined || declaredId === '' ? (previousScreen?.id ?? '') : declaredId
     if (id === '') continue
     if (declaredId !== undefined && declaredId !== '') {
@@ -184,8 +261,8 @@ export async function loadProject(options: LoadProjectOptions): Promise<DesignPr
           severity: 'error',
           code: 'duplicate-screen',
           file: parsed.file,
-          line: parsed.root?.source.line ?? 1,
-          column: parsed.root?.source.column ?? 1,
+          line: candidate.root?.source.line ?? 1,
+          column: candidate.root?.source.column ?? 1,
           message: `Duplicate screen id "${id}" declared in ${firstFile} and ${parsed.file}.`,
         })
         continue
@@ -199,45 +276,81 @@ export async function loadProject(options: LoadProjectOptions): Promise<DesignPr
   screenIds.sort((left, right) => left.localeCompare(right))
   const configTokenDiagnostics = [...diagnostics]
 
-  const projectScreens = screenIds
   const screenResults: ProjectScreen[] = []
-  for (const parsed of parsedScreens) {
+  for (const candidate of prepared) {
+    const parsed = candidate.parsed
     const previousScreen = previousByFile.get(parsed.file)
-    if (parsed.root === undefined) {
+    if (candidate.root === undefined) {
       screenResults.push({
         id: previousScreen?.id ?? '',
         file: parsed.file,
-        diagnostics: sortDiagnostics(parsed.diagnostics),
+        diagnostics: sortDiagnostics(candidate.diagnostics),
         ...(previousScreen?.lastValidRoot === undefined ? {} : { lastValidRoot: previousScreen.lastValidRoot }),
+        states: previousScreen?.states ?? [],
       })
       continue
     }
-    const semantic = validateScreen(parsed.root, parsed.file, {
+    const semantic = validateTree(candidate.root, parsed.file, {
       kit,
       tokens: tokens.tokens,
       breakpoints: parsedConfig.config.breakpoints.map((breakpoint) => breakpoint.name),
-      projectScreens,
+      projectScreens: screenIds,
       designFolder: folder,
       kitVersionPin: parsedConfig.config.kitVersion,
       installedKitVersion,
     })
-    const all = sortDiagnostics([...parsed.diagnostics, ...semantic])
+    const all = sortDiagnostics([...candidate.diagnostics, ...semantic])
     const hasErrors = countDiagnostics(all).errors > 0
     screenResults.push({
-      id: parsed.root.id === '' ? (previousScreen?.id ?? '') : parsed.root.id,
+      id: candidate.root.id === '' ? (previousScreen?.id ?? '') : candidate.root.id,
       file: parsed.file,
-      root: parsed.root,
+      root: candidate.root,
       diagnostics: all,
       ...(hasErrors
         ? previousScreen?.lastValidRoot === undefined
           ? {}
           : { lastValidRoot: previousScreen.lastValidRoot }
-        : { lastValidRoot: parsed.root }),
+        : { lastValidRoot: candidate.root }),
+      states: hasErrors ? (previousScreen?.states ?? []) : candidate.states,
     })
   }
 
+  // Journeys validate against the prepared screens and their named states.
+  const journeyFiles = await listJourneyFiles(folder)
+  const parsedJourneys: ParsedJourney[] = []
+  for (const file of journeyFiles) {
+    const source = await readOptional(join(folder, file))
+    if (source !== undefined) parsedJourneys.push(parseJourney(source, file))
+  }
+  const journeyDiagnostics = journeyDuplicates(parsedJourneys)
+  const screensById = new Map(screenResults.map((screen) => [screen.id, screen]))
+  const journeys: ProjectJourney[] = parsedJourneys.map((parsed) => {
+    const validation = validateJourney(parsed, {
+      projectScreens: screenIds,
+      breakpoints: parsedConfig.config.breakpoints.map((breakpoint) => breakpoint.name),
+      rootOf: (screen) => {
+        const found = screensById.get(screen)
+        return found?.root ?? found?.lastValidRoot
+      },
+      statesOf: (screen) => screensById.get(screen)?.states ?? [],
+    })
+    return {
+      file: parsed.file,
+      id: parsed.journey?.id ?? '',
+      ...(parsed.journey === undefined ? {} : { journey: parsed.journey }),
+      diagnostics: sortDiagnostics([...parsed.diagnostics, ...validation]),
+    }
+  })
+
   const perScreen = screenResults.flatMap((screen) => screen.diagnostics)
-  const allDiagnostics = sortDiagnostics([...configTokenDiagnostics, ...screenDiagnostics, ...perScreen])
+  const perJourney = journeys.flatMap((journey) => journey.diagnostics)
+  const allDiagnostics = sortDiagnostics([
+    ...configTokenDiagnostics,
+    ...screenDiagnostics,
+    ...journeyDiagnostics,
+    ...perScreen,
+    ...perJourney,
+  ])
   const entry = parsedConfig.config.entry ?? screenIds[0]
   if (entry !== undefined && !screenIds.includes(entry)) {
     allDiagnostics.push({
@@ -257,12 +370,7 @@ export async function loadProject(options: LoadProjectOptions): Promise<DesignPr
     screens: screenResults,
     diagnostics: kitMismatch === undefined ? sortDiagnostics(allDiagnostics) : allDiagnostics,
     entry,
+    fixtures: loadedFixtures.collections,
+    journeys,
   }
-}
-
-/** Validation context assembled by {@link loadProject}; kept local to avoid a cycle. */
-import { validateTree, type ValidationContext } from './validate.ts'
-
-function validateScreen(root: DesignScreenNode, file: string, ctx: ValidationContext): Diagnostic[] {
-  return validateTree(root, file, ctx)
 }

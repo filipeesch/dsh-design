@@ -1,5 +1,12 @@
 /** Wire types shared with the host project endpoint. */
-import type { Breakpoint, DesignChild, DesignScreenNode, Diagnostic, ResolvedToken } from '@filipeesch/dsh-design-core'
+import type {
+  Breakpoint,
+  DesignChild,
+  DesignScreenNode,
+  Diagnostic,
+  NamedState,
+  ResolvedToken,
+} from '@filipeesch/dsh-design-core'
 
 /** One screen in the project payload. */
 export interface WireScreen {
@@ -12,6 +19,8 @@ export interface WireScreen {
   readonly diagnostics: readonly Diagnostic[]
   readonly errors: number
   readonly warnings: number
+  /** Validated named initial states for this screen. */
+  readonly states?: readonly NamedState[]
 }
 
 /** Project payload returned by `_/project`. */

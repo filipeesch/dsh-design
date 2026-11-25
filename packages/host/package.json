@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@filipeesch/dsh-design-core": "workspace:*",
-    "@filipeesch/dsh-design-kit": "workspace:*"
+    "@filipeesch/dsh-design-kit": "workspace:*",
+    "playwright-core": "^1.65.1"
   }
 }

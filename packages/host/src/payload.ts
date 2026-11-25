@@ -40,6 +40,7 @@ export function buildPayload(
         diagnostics: screen.diagnostics,
         errors: counts.errors,
         warnings: counts.warnings,
+        states: screen.states,
       }
     })
   const tokens = project.tokens.tokens

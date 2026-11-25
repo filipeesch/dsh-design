@@ -72,7 +72,11 @@ importers:
         specifier: ^2.9.1
         version: 2.9.1
 
-  packages/bundle: {}
+  packages/bundle:
+    dependencies:
+      playwright-core:
+        specifier: ^1.65.1
+        version: 1.65.1
 
   packages/client:
     devDependencies:
@@ -103,6 +107,9 @@ importers:
       '@filipeesch/dsh-design-kit':
         specifier: workspace:*
         version: link:../kit
+      playwright-core:
+        specifier: ^1.65.1
+        version: 1.65.1
 
   packages/kit:
     dependencies:

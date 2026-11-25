@@ -17,6 +17,20 @@ describe('design prompt', () => {
     expect(prompt).toContain('design_view')
     expect(prompt).toContain('tokens.json')
     expect(prompt).toContain('css')
+    expect(prompt).toContain('design_run_journey')
+    expect(prompt).toContain('design_lint')
+    expect(prompt).toContain('design_screenshot')
+    expect(prompt).toContain('design_query')
+    expect(prompt).toContain('fixture(')
+    expect(prompt).toContain('<Journey')
+    expect(prompt).toContain('FICTITIOUS')
+  })
+
+  it('keeps checks opt-in and fixtures fictitious', () => {
+    const prompt = designPrompt()
+    expect(prompt).toContain('Never use real data')
+    expect(prompt).toContain('only when visual evidence is needed')
+    expect(prompt).toContain('Do not turn checks into a mandatory checklist')
   })
 
   it('does not embed per-component prop tables', () => {

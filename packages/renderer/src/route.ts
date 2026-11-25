@@ -6,6 +6,8 @@ export interface PreviewRoute {
   readonly session: string
   readonly screen?: string
   readonly breakpoint?: string
+  /** Named screen state requested by `?state=`. */
+  readonly state?: string
   readonly deterministic: boolean
 }
 
@@ -25,6 +27,7 @@ export function parseRoute(pathname: string, search: string): PreviewRoute {
     session,
     ...(screen === undefined || screen === '' ? {} : { screen }),
     breakpoint: params.get('bp') ?? undefined,
+    state: params.get('state') ?? undefined,
     deterministic: params.get('deterministic') === '1',
   }
 }
@@ -65,19 +68,23 @@ export function subscribeRoute(listener: () => void): () => void {
 }
 
 /** Build the canonical preview URL. */
-export function routeUrl(screen: string, breakpoint?: string, deterministic = false): string {
+export function routeUrl(screen: string, breakpoint?: string, deterministic = false, state?: string): string {
   const route = getRoute()
   const params = new URLSearchParams()
   if (breakpoint !== undefined && breakpoint !== '') params.set('bp', breakpoint)
+  if (state !== undefined && state !== '') params.set('state', state)
   if (deterministic) params.set('deterministic', '1')
   const suffix = params.size === 0 ? '' : '?' + params.toString()
   return '/design/' + encodeURIComponent(route.session) + '/' + encodeURIComponent(screen) + suffix
 }
 
-/** Navigate to a screen, keeping the current breakpoint unless replaced. */
-export function navigateRoute(screen: string, breakpoint?: string): void {
+/**
+ * Navigate to a screen, keeping the current breakpoint unless replaced.
+ * Entering another screen without an explicit state clears `?state=`.
+ */
+export function navigateRoute(screen: string, breakpoint?: string, state?: string): void {
   const route = getRoute()
-  const next = routeUrl(screen, breakpoint ?? route.breakpoint, route.deterministic)
+  const next = routeUrl(screen, breakpoint ?? route.breakpoint, route.deterministic, state)
   if (next !== globalThis.location.pathname + globalThis.location.search) history.pushState(null, '', next)
   emit()
 }
@@ -92,7 +99,7 @@ export function selectBreakpoint(breakpoint: string): void {
     if (route.deterministic) params.set('deterministic', '1')
     history.pushState(null, '', '/design/' + encodeURIComponent(route.session) + '/' + '?' + params.toString())
   } else {
-    history.pushState(null, '', routeUrl(screen, breakpoint, route.deterministic))
+    history.pushState(null, '', routeUrl(screen, breakpoint, route.deterministic, route.state))
   }
   emit()
 }

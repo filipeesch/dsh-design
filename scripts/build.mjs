@@ -21,7 +21,7 @@ const nodeShared = {
   format: 'esm',
   platform: 'node',
   target: 'node24',
-  external: ['@deepseek-ai/*'],
+  external: ['@deepseek-ai/*', 'playwright-core'],
   alias: aliases,
   sourcemap: true,
   logLevel: 'warning',

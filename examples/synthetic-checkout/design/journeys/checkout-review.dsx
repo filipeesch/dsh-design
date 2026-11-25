@@ -1,0 +1,7 @@
+<Journey id="checkout-review" start="checkout" state="review-open" breakpoint="desktop">
+  <ExpectVisible target="review-drawer" visible={true} />
+  <ExpectValue target="email" value="ada@example.com" />
+  <ExpectValue target="plan" value="pro" />
+  <Tap target="close-review" />
+  <ExpectVisible target="review-drawer" visible={false} />
+</Journey>
