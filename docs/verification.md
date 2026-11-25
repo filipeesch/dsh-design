@@ -1,5 +1,22 @@
 # Verification evidence
 
+## GitHub Release distribution (add-github-release-distribution)
+
+- Published [v0.1.0](https://github.com/filipeesch/dsh-design/releases/tag/v0.1.0)
+  from source commit `c7b68a1`. The rebuilt 1,326,516-byte bundle matched the
+  previously verified local tarball. SHA-256:
+  `ee7d46a81cc20b4a9ce86392cdc95dfb7103ee9f504b77a99761f9345475fe35`.
+- The full Vitest suite passed: 324 tests across 25 files. The archive audit
+  inspected 22 files, including source maps, and found no live capture tooling,
+  worker, or configuration and no install-time build scripts.
+- Both public download URLs (latest and versioned) returned the same bundle
+  and checksum bytes as the staged release files.
+- A disposable DSH Web profile installed and enabled `@filipeesch/dsh-design-bundle@0.1.0`
+  through the UI using the exact latest URL. No build-script approval was needed.
+  After restart, the Design preset opened the synthetic catalog at 390 px and
+  1280 px (authenticated HTTP 200). A separate test using the local tarball
+  produced the same previews. All temporary servers were stopped.
+
 ## Design handoff (add-design-handoff)
 
 Checks run on the packed bundle for this change, on top of the published

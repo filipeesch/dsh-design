@@ -12,9 +12,8 @@ outside the DSH source tree, and installed into a DSH profile with `dsh plugin`.
 
 ## Requirements
 
-- Node.js 24.9 or newer
-- pnpm 11
-- A DSH installation whose profile can install local bundles
+- DSH `>=0.2.2-rc.3 <0.3.0` with plugin installation enabled.
+- For building from source: Node.js 24.9 or newer and pnpm 11.
 - Optional: a Playwright Chromium for headless journeys, lint, layout snapshots,
   and screenshots. Preview and static tools work without one.
 
@@ -32,6 +31,42 @@ pnpm exec playwright install chromium
 
 ## Install
 
+### From a GitHub Release
+
+Releases publish a prebuilt bundle. The DSH installer handles package
+installation; there is no source checkout, local build, or plugin build-script
+approval.
+
+Paste this stable URL into the DSH plugin installer:
+
+```text
+https://github.com/filipeesch/dsh-design/releases/latest/download/dsh-design-bundle.tgz
+```
+
+After installation, select **Enable now** if offered, then restart the
+profile if DSH prompts. The optional CLI equivalent is:
+
+```sh
+dsh plugin --profile <profile> add https://github.com/filipeesch/dsh-design/releases/latest/download/dsh-design-bundle.tgz
+```
+
+The latest URL always serves the current latest stable release and is mutable.
+For a fixed version, use the version-specific asset URL; this is v0.1.0:
+
+```text
+https://github.com/filipeesch/dsh-design/releases/download/v0.1.0/dsh-design-bundle.tgz
+```
+
+Each release also publishes `dsh-design-bundle.tgz.sha256`. Releases do not
+update an installed profile automatically. Pin the version URL when you need the
+same bytes later, and follow [Update](#update) to move to a newer release.
+
+Do not paste the repository URL. It selects this monorepo root
+(`@filipeesch/dsh-design-workspace`), not the installable bundle. If you already
+did, see [Remove](#remove).
+
+### From a local checkout
+
 Build first: the bundle serves the built renderer, fonts, and client files.
 
 Linked development checkout:
@@ -47,13 +82,17 @@ pnpm run pack:bundle
 dsh plugin --profile <profile> add <checkout>/dist/filipeesch-dsh-design-bundle-0.1.0.tgz
 ```
 
-Either route installs the same built bundle; the tarball does not require the
-profile to see the source checkout. Restart DSH after installing. The profile
-then lists the **Design** agent preset, and the preview route answers under
-`/design/<session-id>/` on the DSH web server. Opening a design session gives the agent `design_init`, `design_status`,
-`design_validate`, `design_view` (including measured layout), `design_catalog`,
+Either local route installs the same built bundle; the tarball does not require
+the profile to see the source checkout. Restart DSH after installing. The
+profile then lists the **Design** agent preset, and the preview route answers
+under `/design/<session-id>/` on the DSH web server. Opening a design session
+gives the agent `design_init`, `design_status`, `design_validate`,
+`design_view` (including measured layout), `design_catalog`,
 `design_run_journey`, `design_lint`, `design_screenshot`, `design_query`,
 `design_diff`, and `design_handoff`.
+
+Maintainer release steps and the asset contract are in
+[`docs/releasing.md`](docs/releasing.md).
 
 Live capture of external development applications is deferred and is not
 included in this bundle. Preview and handoff operate on local design sources.
@@ -65,7 +104,22 @@ session header to place the same preview beside the conversation.
 
 ## Update
 
-Rebuild, then restart the profile:
+Release installs are explicit and never automatic. Remove the installed bundle,
+then install the version-specific asset URL for the target release:
+
+```sh
+dsh plugin --profile <profile> remove @filipeesch/dsh-design-bundle
+dsh plugin --profile <profile> add 'https://github.com/filipeesch/dsh-design/releases/download/<tag>/dsh-design-bundle.tgz'
+```
+
+Replace `<tag>` with the new release tag (for example, `v0.1.0`).
+
+Remove and reinstall instead of reinstalling the mutable latest URL in place:
+this avoids a cached resolution of the same URL and keeps the installed version
+explicit. Use the latest URL only for a deliberate fresh install. Restart DSH
+after the reinstall.
+
+For a linked development checkout, rebuild instead:
 
 ```sh
 pnpm run build
@@ -83,6 +137,17 @@ dsh plugin --profile <profile> remove @filipeesch/dsh-design-bundle
 
 Restart DSH. The preset, tools, route, and client contribution are gone; DSH
 starts normally. Design folders in target repositories stay as plain files.
+
+If you previously pasted the repository URL, DSH installed the monorepo root
+instead of the bundle. Remove that entry by its recorded package name, then
+install the release asset:
+
+```sh
+dsh plugin --profile <profile> remove @filipeesch/dsh-design-workspace
+```
+
+If the profile lists a different name for the incorrect entry, remove exactly
+that name. Neither command deletes the checkout or design folders.
 
 ## Packages
 
@@ -305,9 +370,12 @@ See [`docs/handoff.md`](docs/handoff.md).
   `unicode-range`. Characters outside that range use the browser's fallback
   font, which is not bundled; deterministic rendering of such text therefore
   depends on the platform font.
-- `pnpm run pack:bundle` produces the artifact used for non-link installs. The
-  documented machine flow is clone -> install -> build -> pack -> `dsh plugin`
-  install of that local tarball; a direct Git URL install is not claimed.
+- `pnpm run pack:bundle` produces the local artifact used for non-link
+  installs. The distributed artifact is the GitHub Release asset
+  `dsh-design-bundle.tgz`, built from the same bundle. A direct source
+  repository URL is not an install path: it selects the monorepo root. Local
+  checkout and local tarball installs remain supported; maintainer steps are in
+  [`docs/releasing.md`](docs/releasing.md).
 - The bundle deliberately imports no `@deepseek-ai/*` runtime module, so a
   public checkout installs with plain `pnpm install`.
 - Fixtures and journeys are read on every project load, participate in the
