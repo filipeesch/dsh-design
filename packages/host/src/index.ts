@@ -47,6 +47,8 @@ export class DesignService {
   readonly comments: CommentStore
   /** Overall timeout for one headless check. */
   readonly browserTimeoutMs: number
+  /** Operator-configured Chromium executable for headless work. */
+  readonly chromiumPath: string | undefined
   private readonly ctx: any
 
   constructor(ctx: any, config: DesignConfig = {}) {
@@ -55,6 +57,7 @@ export class DesignService {
     this.folderName = folderName
     this.assetsDir = config.assetsDir ?? defaultAssetsDir()
     this.browserTimeoutMs = config.browserTimeoutMs ?? 20000
+    this.chromiumPath = config.chromiumPath
     this.browsers = new BrowserSessions({
       ...(config.chromiumPath === undefined ? {} : { executablePath: config.chromiumPath }),
       ...(config.browserTimeoutMs === undefined ? {} : { timeoutMs: config.browserTimeoutMs }),

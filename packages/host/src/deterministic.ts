@@ -2,7 +2,7 @@
 import { readFile, realpath, stat } from 'node:fs/promises'
 import { extname, resolve, sep } from 'node:path'
 import { randomBytes } from 'node:crypto'
-import type { DesignChild, DesignProject } from '@filipeesch/dsh-design-core'
+import type { DesignChild, DesignProject, DesignScreenNode } from '@filipeesch/dsh-design-core'
 import type { PreviewPayload } from './payload.ts'
 import { MAX_DETERMINISTIC_FILE_BYTES, MAX_DETERMINISTIC_MEDIA_BYTES, RASTER_TYPES, rasterDataUri } from './media.ts'
 
@@ -36,18 +36,23 @@ function collectPaths(node: DesignChild | undefined, paths: Set<string>): void {
   for (const child of node.children) collectPaths(child, paths)
 }
 
-/** Inline bounded, validated local raster bytes referenced by the project. */
-export async function collectDeterministicAssets(project: DesignProject): Promise<Record<string, string>> {
+/** Sorted local raster paths referenced by the supplied roots. */
+export function referencedAssetPaths(roots: readonly (DesignChild | DesignScreenNode | undefined)[]): string[] {
   const paths = new Set<string>()
-  for (const screen of project.screens) {
-    collectPaths(screen.root, paths)
-    collectPaths(screen.lastValidRoot, paths)
-  }
-  const root = await realpath(project.folder).catch(() => undefined)
+  for (const root of roots) collectPaths(root, paths)
+  return [...paths].sort((left, right) => left.localeCompare(right))
+}
+
+/** Inline bounded, validated local raster bytes referenced by selected roots. */
+export async function collectAssetsForRoots(
+  folder: string,
+  roots: readonly (DesignChild | DesignScreenNode | undefined)[],
+): Promise<Record<string, string>> {
+  const root = await realpath(folder).catch(() => undefined)
   if (root === undefined) return {}
   const assets: Record<string, string> = {}
   let total = 0
-  for (const path of [...paths].sort()) {
+  for (const path of referencedAssetPaths(roots)) {
     const target = resolve(root, path)
     const real = await realpath(target).catch(() => undefined)
     if (real === undefined || (real !== root && !real.startsWith(root + sep))) continue
@@ -61,6 +66,15 @@ export async function collectDeterministicAssets(project: DesignProject): Promis
     total += buffer.length
   }
   return assets
+}
+
+/** Inline bounded, validated local raster bytes referenced by the project. */
+export async function collectDeterministicAssets(project: DesignProject): Promise<Record<string, string>> {
+  const roots: (DesignChild | DesignScreenNode | undefined)[] = []
+  for (const screen of project.screens) {
+    roots.push(screen.root, screen.lastValidRoot)
+  }
+  return collectAssetsForRoots(project.folder, roots)
 }
 
 /** Escape JSON for an inline script. */

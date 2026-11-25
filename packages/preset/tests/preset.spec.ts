@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
+import { handoffPrompt } from '@filipeesch/dsh-design-core'
 import { designPrompt } from '../src/prompt.ts'
 import { designPresetPlugins } from '../src/plugins.ts'
 
@@ -51,6 +52,18 @@ describe('design prompt', () => {
   })
 })
 
+describe('handoff guidance', () => {
+  it('documents the standalone manifest handoff', () => {
+    const prompt = handoffPrompt()
+    expect(prompt.length).toBeLessThan(2000)
+    expect(prompt).toContain('design_handoff')
+    expect(prompt).not.toContain('design_capture')
+    expect(prompt).toContain('manifest')
+    expect(prompt).toContain('design cache')
+    expect(prompt).toContain('ordinary file tools')
+  })
+})
+
 describe('design preset composition', () => {
   it('contains standard tools plus the design session plugin', () => {
     const plugins = designPresetPlugins()
@@ -65,6 +78,9 @@ describe('design preset composition', () => {
     ])
       expect(names).toContain(standard)
     expect(plugins.at(-1)).toMatchObject({ id: 'design-session' })
+    expect(plugins.filter((entry) => entry.id === 'design-session')).toHaveLength(1)
+    expect(plugins.some((entry) => entry.name.includes('design_capture'))).toBe(false)
+    expect(plugins.some((entry) => entry.name.includes('design_handoff'))).toBe(false)
   })
 
   it('drifts only when the shipped standard composition changes', async () => {

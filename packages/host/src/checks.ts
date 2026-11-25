@@ -4,8 +4,8 @@
  * explicit canvas screenshots.
  */
 import { createHash, randomUUID } from 'node:crypto'
-import { lstat, mkdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { rename, rm, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import {
   countDiagnostics,
   findNamedState,
@@ -17,6 +17,7 @@ import {
 } from '@filipeesch/dsh-design-core'
 import { KIT_VERSION } from '@filipeesch/dsh-design-kit/meta'
 import { BrowserSessions, DesignBrowserError, settleFrame } from './browser.ts'
+import { cacheAreaDirectory, revalidateCacheArea } from './cache.ts'
 import { collectDeterministicAssets } from './deterministic.ts'
 import { buildPayload, type PreviewPayload } from './payload.ts'
 import { compatibleState, resolveScreenProjection, type ResolvedVariant } from './projection.ts'
@@ -158,14 +159,23 @@ function requireScreen(project: DesignProject, id: string): ProjectScreen {
   return requireProjection(project, id).screen
 }
 
+/** Build the immutable preview payload from a pre-collected asset snapshot. */
+export function payloadFromAssets(
+  project: DesignProject,
+  session: string,
+  assets: Record<string, string>,
+  variant?: { screen: string; group: string; branch: string },
+): PreviewPayload {
+  return buildPayload(session, 0, KIT_VERSION, project, assets, variant)
+}
+
 /** Build the immutable preview payload shared by preview and checks. */
 export async function payloadFor(
   project: DesignProject,
   session: string,
   variant?: { screen: string; group: string; branch: string },
 ): Promise<PreviewPayload> {
-  const assets = await collectDeterministicAssets(project)
-  return buildPayload(session, 0, KIT_VERSION, project, assets, variant)
+  return payloadFromAssets(project, session, await collectDeterministicAssets(project), variant)
 }
 
 interface RenderInput {
@@ -908,58 +918,14 @@ function screenshotName(
   return parts.join('-') + '.png'
 }
 
-/**
- * Validate one cache directory component before creating it. Existing symlinks,
- * non-directories, and paths whose canonical target is not the expected plain
- * directory are refused.
- */
-async function ensureCacheComponent(path: string, expected: string): Promise<string> {
-  let info = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === 'ENOENT') return undefined
-    throw error
-  })
-  if (info === undefined) {
-    try {
-      await mkdir(path)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-    }
-    info = await lstat(path)
-  }
-  if (info.isSymbolicLink() || !info.isDirectory()) {
-    throw new Error('The design cache component "' + path + '" must be a plain directory; refusing to write.')
-  }
-  const real = await realpath(path)
-  if (real !== expected) {
-    throw new Error('The design cache resolves outside its canonical location; refusing to write.')
-  }
-  return real
-}
-
 /** Resolve and verify the canonical screenshot directory inside `.cache`. */
 async function screenshotDirectory(folder: string): Promise<string> {
-  const realFolder = await realpath(folder)
-  const cache = resolve(realFolder, '.cache')
-  await ensureCacheComponent(cache, cache)
-  const directory = resolve(cache, 'screenshots')
-  await ensureCacheComponent(directory, directory)
-  return directory
+  return cacheAreaDirectory(folder, 'screenshots')
 }
 
 /** Revalidate the canonical screenshot directory immediately before a write. */
 async function revalidateScreenshotDirectory(folder: string, directory: string): Promise<string> {
-  const realFolder = await realpath(folder)
-  const expected = resolve(realFolder, '.cache', 'screenshots')
-  if (directory !== expected) throw new Error('The screenshot cache path is not canonical; refusing to write.')
-  const info = await lstat(directory).catch(() => undefined)
-  if (info === undefined || info.isSymbolicLink() || !info.isDirectory()) {
-    throw new Error('The screenshot cache is no longer a plain directory; refusing to write.')
-  }
-  const real = await realpath(directory)
-  if (real !== expected) {
-    throw new Error('The screenshot cache resolves outside its canonical location; refusing to write.')
-  }
-  return real
+  return revalidateCacheArea(folder, 'screenshots', directory)
 }
 
 /** Capture the canvas as a deterministic PNG under the ignored cache. */

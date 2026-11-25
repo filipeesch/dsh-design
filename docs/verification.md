@@ -1,5 +1,95 @@
 # Verification evidence
 
+## Design handoff (add-design-handoff)
+
+Checks run on the packed bundle for this change, on top of the published
+baseline `a3f13e8`. The disposable profile used a separate loopback port; the
+live GUI on 3080 and the DSH implementation checkout were not modified. The
+repeatable procedure is in
+[`docs/review/handoff-review.md`](review/handoff-review.md).
+
+```sh
+pnpm run check
+openspec validate add-design-handoff --strict
+pnpm run pack:bundle
+```
+
+Results:
+
+- `pnpm run check` exits 0: build, compile-time type tests, ESLint, Prettier,
+  EOF newline, and Vitest. Vitest reports 25 files and 323 tests passed,
+  including the real Chromium handoff, preview, variant, comment, and check
+  suites.
+- `openspec validate add-design-handoff --strict` passed before archive. All
+  five implementation and verification tasks are complete.
+- The preset drift test passed with `DSH_CHECKOUT=<path-to-dsh-checkout>`: the
+  Design preset still differs from the shipped standard composition only by
+  `design-session`, so the default coding preset is unchanged.
+- `pnpm run pack:bundle` writes
+  `dist/filipeesch-dsh-design-bundle-0.1.0.tgz` (1,326,516 bytes; sha256
+  `ee7d46a81cc20b4a9ce86392cdc95dfb7103ee9f504b77a99761f9345475fe35`).
+- The packed artifact contains the handoff tool and no import tool. A full
+  extract scan found no `design_capture`, `captureOrigins`, `captureTimeoutMs`,
+  or `DSH_DESIGN_CAPTURE_ORIGINS`; neither preset registers an import tool.
+- The packed artifact was installed into a fresh disposable profile and booted
+  on a non-3080 loopback port with the synthetic workspace.
+  `docs/review/handoff-review-session.mjs` reported:
+
+  ```text
+  REVIEW_TOOLS {"design":["design_catalog","design_diff","design_handoff","design_init","design_lint","design_query","design_run_journey","design_screenshot","design_status","design_validate","design_view"],"standard":[]}
+  REVIEW_HANDOFF {"mobile":{"id":"a5f55edec0782bf133b87a1ee2026dbfc8a65bf8712a2562486b014389a34a3b","projections":1,"screens":["checkout"],"supportingScreens":["catalog","confirmation"],"breakpoints":["mobile"],"files":11,"supportBreakpoints":[{"name":"mobile","width":390},{"name":"tablet","width":768},{"name":"desktop","width":1280}],"cacheRelative":true,"noCapture":true,"noAbsolutePath":true},"desktop":{"id":"a7ab63de711b02dac3ca79a7adf31d7544b751f30488730e4ae34ee237979104","projections":1,"breakpoints":["desktop"],"distinctId":true}}
+  REVIEW_REPRODUCIBLE {"reused":true,"sameId":true,"sameWorkspaceFiles":true,"otherWorkspaceSameId":true,"otherWorkspaceSameFiles":true,"fileCount":12}
+  REVIEW_REOPEN_MOBILE {"errors":0,"warnings":0,"journeys":[{"id":"catalog-to-confirmation","ok":true,"steps":10},{"id":"checkout-review","ok":true,"steps":5}],"allJourneysPass":true}
+  REVIEW_REOPEN_DESKTOP {"errors":0,"warnings":0,"journeys":[{"id":"catalog-to-confirmation","ok":true,"steps":10},{"id":"checkout-review","ok":true,"steps":5}],"allJourneysPass":true}
+  REVIEW_CACHE_IGNORE {"cacheIgnored":true}
+  ```
+
+  The Design session had `design_handoff` and no import tool; the standard
+  session had no design tools. The harness created both sessions without
+  prompting a model, so the run made no real model call. The Mobile package
+  was regenerated after deletion and reproduced in a second synthetic
+  workspace with the same id and bytes. Both Mobile-only and Desktop-only
+  packages reopened unchanged in fresh DSH workspaces, validated with zero
+  errors, and passed both applicable journeys in real Chromium.
+  `git check-ignore` reported `design/.gitignore:1:.cache/` for both handoff
+  manifests; no import-artifact directory exists.
+
+- `docs/review/handoff-check.mjs` against the same disposable instance reported
+  `{"ok":true,"failures":[]}`: desktop canvas 1280 px in a 1440 px document
+  with zero horizontal overflow and the review drawer open; Mobile canvas
+  390 px in a 390 px document with zero overflow and the drawer open; handoff
+  layouts and PNGs both 1280 px (desktop `$default`) and 390 px (Mobile
+  `review-open`); two handoff packages; `captureCacheAbsent: true`.
+- Targeted regressions cover cache reuse, tampered/partial package refusal,
+  staging cleanup, symlinked cache refusal, pre-call and late cache
+  cancellation with no completed artifact, concurrent same-id publication,
+  explicit and bounded selection, stale/invalid source refusal, mutation of
+  tokens and journeys after the validated snapshot, chosen-only DSX round trip
+  with fixture-expanded ids, full configured breakpoints with a requested
+  subset, supporting-source closure for selected navigation and journeys with
+  no extra projections or unrelated flows, reopened `design_validate` and
+  journey checks, named state `"default"` versus the unambiguous `$default`
+  selector, collision-free projection ids for delimiter-bearing tuple
+  components, interaction and named-state preservation, cross-workspace byte
+  identity, distinct effective inputs, and relevant-journey cross-screen
+  dependencies.
+- Independent Codex review passed on the exact shipped SHA-256 above. All 22
+  installed files matched the tarball. Design registered handoff; Standard read
+  its manifest with the ordinary file tool. Neither preset registered live app
+  capture, and the packed sources, source maps, and configuration excluded it.
+- The independently reopened Desktop-only and Mobile-only packages each had
+  zero validation errors and warnings, one layout and PNG, and both journeys
+  passed (10 and 5 steps). All 11 files per package matched across fresh
+  regenerations in the same and another workspace. Cancellation during staging
+  exposed no new package and left staging empty.
+- The reviewer inspected both live previews and exported PNGs in Chromium. The
+  1280 × 520 and 390 × 520 canvases showed the review drawer without page-wide
+  horizontal overflow; all seven compared stable-ID boxes matched at each
+  width. The deterministic PNG excludes preview chrome and is not expected to
+  be pixel-identical to the interactive preview.
+- The disposable review processes were stopped. Neither checkout nor the
+  synthetic fixture sources were modified during independent review.
+
 Checks run while implementing `add-design-journeys-and-checks` on top of the
 `add-design-foundation` baseline. Paths are portable placeholders; no owner
 token, real session id, temporary home, or machine-specific path is recorded.

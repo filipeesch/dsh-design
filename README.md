@@ -5,9 +5,10 @@ clickable, responsive web app in a restricted JSX-style DSL, preview it live in
 the browser, and iterate with validation feedback attached to every edit.
 
 This repository implements the `add-design-foundation`,
-`add-design-journeys-and-checks`, `add-design-panel-and-comments`, and
-`add-design-variants` OpenSpec changes. The plugin is developed here, outside the DSH source tree, and
-installed into a DSH profile with `dsh plugin`.
+`add-design-journeys-and-checks`, `add-design-panel-and-comments`,
+`add-design-variants`, `anchor-design-comment-composer`, and
+`add-design-handoff` OpenSpec changes. The plugin is developed here,
+outside the DSH source tree, and installed into a DSH profile with `dsh plugin`.
 
 ## Requirements
 
@@ -51,8 +52,8 @@ profile to see the source checkout. Restart DSH after installing. The profile
 then lists the **Design** agent preset, and the preview route answers under
 `/design/<session-id>/` on the DSH web server. Opening a design session gives the agent `design_init`, `design_status`,
 `design_validate`, `design_view` (including measured layout), `design_catalog`,
-`design_run_journey`, `design_lint`, `design_screenshot`, `design_query`, and
-`design_diff`.
+`design_run_journey`, `design_lint`, `design_screenshot`, `design_query`,
+`design_diff`, and `design_handoff`.
 
 A session whose working directory contains `design/design.json` gets a live
 preview. The agent shares the URL from `design_status`; open it in a normal
@@ -244,6 +245,39 @@ browser matching the installed `playwright-core`:
 ```sh
 pnpm exec playwright install chromium
 ```
+
+## Implementation handoff
+
+`design_handoff` generates a reproducible implementation package on demand under
+`design/.cache/handoff/<content-id>/`. It resolves the requested screen, named
+state, and breakpoint matrix before opening a browser, then writes:
+
+- chosen-only, editable `screens/*.dsx` with stable ids, interactions, and named
+  states, and no variant wrappers or discarded branches;
+- the necessary `tokens.json`, `tokens.resolved.json`, `design.json`, local
+  raster assets, and relevant `journeys/*.dsx` acceptance flows;
+- a bounded chosen-source closure for selected `navigate()` targets and journeys:
+  supporting screens are marked and get DSX only, never extra projections;
+- matching semantic layout JSON and canvas PNGs from the same committed canvas;
+- a sorted `manifest.json` separating the requested `selection` from the
+  `support` closure, with explicit dimensions, choices, browser/kit identity,
+  artifact sizes, and SHA-256 digests. `design.json` keeps every configured
+  breakpoint so responsive maps remain valid, even for a narrower evidence set.
+
+Omitted selectors default to every valid chosen screen, the unnamed state plus
+every named state, and every configured breakpoint, bounded to 24 projections and
+32 screens. Use `states: ["$default"]` for the unnamed state; a named state is
+selected by its literal name, including `"default"`. Projection ids are
+collision-free length-prefixed tuples. The package is content-addressed and
+verified before reuse; invalid, stale, interrupted, or partially published output
+fails explicitly. It is derived cache, never committed. A coding agent in any
+preset can read the manifest and package with ordinary file tools; handoff stays
+in the Design preset.
+
+The import workflow is out of scope for this repository change: no import
+tooling, settings, or artifacts are shipped.
+
+See [`docs/handoff.md`](docs/handoff.md).
 
 ## Development notes
 

@@ -3,22 +3,30 @@
  * tools plus automatic validation of every call that changed design files.
  */
 import { randomUUID } from 'node:crypto'
+import { realpath } from 'node:fs/promises'
+import { relative, sep } from 'node:path'
 import {
   countDiagnostics,
+  designPrompt,
+  handoffPrompt,
   editDistance,
   formatDiagnostic,
   loadProject,
   projectScreen,
   propsOf,
+  resolveHandoffPlan,
   scaffoldProject,
   sortDiagnostics,
+  HandoffSelectionError,
   type DesignProject,
   type Diagnostic,
 } from '@filipeesch/dsh-design-core'
 import { KIT_VERSION, componentNames, kitMetadata } from '@filipeesch/dsh-design-kit/meta'
 import { BrowserSessions } from './browser.ts'
 import { DesignBrowserError } from './browser.ts'
+import { PackageError } from './cache.ts'
 import { captureScreenshot, payloadFor, readSnapshot, runJourney, runLint, type CheckContext } from './checks.ts'
+import { HandoffError, runHandoff } from './handoff.ts'
 import { queryDesign } from './query.ts'
 import { diffGitRevisions, diffVariantBranches, formatDesignDiff } from './diff.ts'
 import { compatibleState, resolveScreenProjection } from './projection.ts'
@@ -32,7 +40,8 @@ export const inject = ['tools', 'design', 'systemPrompt']
 const MAX_ATTACHED = 10
 
 interface ParameterSpec {
-  type?: 'string' | 'number' | 'boolean'
+  type?: 'string' | 'number' | 'boolean' | 'array'
+  items?: 'string'
   enum?: readonly string[]
   description?: string
   required?: boolean
@@ -70,6 +79,7 @@ function tool(options: ToolOptions): Record<string, unknown> {
   for (const [name, spec] of Object.entries(options.parameters)) {
     properties[name] = {
       ...(spec.type === undefined ? {} : { type: spec.type }),
+      ...(spec.type === 'array' ? { items: { type: spec.items ?? 'string' } } : {}),
       ...(spec.enum === undefined ? {} : { enum: [...spec.enum] }),
       ...(spec.description === undefined ? {} : { description: spec.description }),
     }
@@ -96,8 +106,12 @@ function tool(options: ToolOptions): Record<string, unknown> {
           if (spec.required === true) throw new Error(options.name + ': missing required argument "' + name + '"')
           continue
         }
-        if (spec.type !== undefined && typeof value !== spec.type)
+        if (spec.type === 'array') {
+          if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string'))
+            throw new Error(options.name + ': argument "' + name + '" must be an array of strings')
+        } else if (spec.type !== undefined && typeof value !== spec.type) {
           throw new Error(options.name + ': argument "' + name + '" must be a ' + spec.type)
+        }
         if (spec.enum !== undefined && !spec.enum.includes(String(value)))
           throw new Error(options.name + ': argument "' + name + '" must be one of ' + spec.enum.join(', '))
       }
@@ -221,10 +235,30 @@ function text(value: unknown): Array<{ type: 'text'; text: string }> {
   return [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }]
 }
 
+/** Project-relative path with forward slashes for tool results and artifacts. */
+async function projectPath(cwd: string, folder: string, absolute: string): Promise<string> {
+  const realCwd = await realpath(cwd)
+  const realFolder = await realpath(folder)
+  const design = relative(realCwd, realFolder).split(sep).join('/')
+  const inside = relative(realFolder, absolute).split(sep).join('/')
+  return design + '/' + inside
+}
+
 /** Register the design tools and automatic validation. */
 export function apply(ctx: any): void {
   const changes = new Map<symbol, { folder: string; files: string[] }>()
   const pending = new Map<symbol, { folder: string; files: Set<string> }>()
+
+  ctx.systemPrompt.section({
+    name: 'design:guidance',
+    order: 700,
+    text: designPrompt(componentNames),
+  })
+  ctx.systemPrompt.section({
+    name: 'design:handoff',
+    order: 710,
+    text: handoffPrompt(),
+  })
 
   ctx.on('tools/execute', async (exec: any, next: () => Promise<any>) => {
     const session = exec.agent?.session
@@ -980,6 +1014,148 @@ export function apply(ctx: any): void {
           ...(args.highlight === undefined ? {} : { highlight: args.highlight }),
           ...(args.variant === undefined ? {} : { variant: args.variant }),
         })
+      },
+    }),
+  )
+
+  ctx.tools.register(
+    tool({
+      name: 'design_handoff',
+      description:
+        'Generate an on-demand, content-addressed implementation package under the ignored design cache for chosen screens, named states, and breakpoints: editable chosen DSX, support inputs, resolved tokens, relevant journeys, semantic boxes, and canvas screenshots.',
+      parameters: {
+        screens: {
+          type: 'array',
+          items: 'string',
+          description: 'Screen ids to include; omit for every valid chosen screen.',
+        },
+        states: {
+          type: 'array',
+          items: 'string',
+          description:
+            'Named state names, plus "$default" for the unnamed state; omit for the unnamed state and every declared state. A state literally named "default" is selected by its own name.',
+        },
+        breakpoints: {
+          type: 'array',
+          items: 'string',
+          description: 'Configured breakpoint names; omit for every configured breakpoint.',
+        },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            status: { type: 'string', required: true },
+            message: { type: 'string' },
+            error: { type: 'string' },
+            errorCode: { type: 'string' },
+            package: { type: 'string' },
+            manifest: { type: 'string' },
+            id: { type: 'string' },
+            screens: { type: 'array', items: { type: 'string' } },
+            supportingScreens: { type: 'array', items: { type: 'string' } },
+            states: { type: 'array', items: { type: 'string' } },
+            breakpoints: { type: 'array', items: { type: 'string' } },
+            projections: { type: 'number' },
+            counts: { type: 'object', additionalProperties: true, properties: {} },
+            bytes: { type: 'number' },
+            warnings: { type: 'array', items: { type: 'string' } },
+            reused: { type: 'boolean' },
+          },
+        },
+        render: (_args: unknown, value: any) => {
+          if (value.status !== 'ok') return text('Handoff ' + value.status + ': ' + (value.error ?? 'unknown error'))
+          return text(
+            'Wrote handoff ' +
+              value.package +
+              ' with ' +
+              String(value.projections) +
+              ' projection(s) across ' +
+              value.screens.join(', ') +
+              ' at ' +
+              value.breakpoints.join(', ') +
+              (value.supportingScreens === undefined || value.supportingScreens.length === 0
+                ? ''
+                : ' with supporting source(s) ' + value.supportingScreens.join(', ')) +
+              '. Manifest: ' +
+              value.manifest,
+          )
+        },
+      },
+      async execute(args: any, exec: any) {
+        const { facts, project } = await loadForSession(ctx, exec)
+        if (project.diagnostics.some((diagnostic) => diagnostic.code === 'project-missing')) {
+          return {
+            status: 'error',
+            errorCode: 'no-project',
+            error: 'No design project exists at ' + ctx.design.folderForCwd(facts.cwd) + '; call design_init first.',
+          }
+        }
+        let plan
+        try {
+          plan = resolveHandoffPlan(project, {
+            ...(args.screens === undefined ? {} : { screens: args.screens as string[] }),
+            ...(args.states === undefined ? {} : { states: args.states as string[] }),
+            ...(args.breakpoints === undefined ? {} : { breakpoints: args.breakpoints as string[] }),
+            kit: kitMetadata,
+          })
+        } catch (error) {
+          if (error instanceof HandoffSelectionError) {
+            return { status: 'error', errorCode: error.code, error: error.message }
+          }
+          throw error
+        }
+        try {
+          const result = await runHandoff({
+            folder: project.folder,
+            project,
+            plan,
+            ctx: checkContext(ctx, exec),
+          })
+          const packagePath = await projectPath(facts.cwd, project.folder, result.path)
+          return {
+            status: 'ok',
+            message:
+              'Wrote handoff package ' +
+              packagePath +
+              ' with ' +
+              String(result.projections) +
+              ' projection(s)' +
+              (result.reused ? ' (verified cache reuse).' : '.'),
+            package: packagePath,
+            manifest: await projectPath(facts.cwd, project.folder, result.manifest),
+            id: result.id,
+            screens: [...result.screens],
+            supportingScreens: [...result.supportingScreens],
+            states: [...new Set(plan.projections.map((projection) => projection.stateName))],
+            breakpoints: [...result.breakpoints],
+            projections: result.projections,
+            counts: result.counts,
+            bytes: result.bytes,
+            warnings: [...result.warnings],
+            reused: result.reused,
+          }
+        } catch (error) {
+          if (error instanceof HandoffError) {
+            return {
+              status: error.code === 'cancelled' ? 'cancelled' : 'error',
+              errorCode: error.code,
+              error: error.message,
+            }
+          }
+          if (error instanceof PackageError) {
+            return { status: 'error', errorCode: error.code, error: error.message }
+          }
+          if (error instanceof DesignBrowserError) {
+            return {
+              status: error.code === 'cancelled' ? 'cancelled' : error.code === 'timeout' ? 'timeout' : 'error',
+              errorCode: error.code,
+              error: 'The design handoff render failed closed.',
+            }
+          }
+          return { status: 'error', errorCode: 'package-failed', error: 'The design handoff failed closed.' }
+        }
       },
     }),
   )

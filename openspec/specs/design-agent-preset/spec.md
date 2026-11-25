@@ -61,3 +61,10 @@ The preset SHALL show the agent how to author alternatives in the DSL, share and
 #### Scenario: Explore without changing the chosen design
 - **WHEN** the agent is asked to try a new alternative
 - **THEN** the guidance tells it to keep the current choice while preparing the comparison and wait for an explicit selection before promotion
+
+### Requirement: Implementation handoff guidance
+Design guidance SHALL explain how to generate and regenerate a chosen handoff on demand, validate the design and relevant journeys, and share the manifest path with the implementing agent. It SHALL distinguish the design contract from generated implementation code and keep generated output out of Git.
+
+#### Scenario: Share the accepted design with an implementer
+- **WHEN** the owner requests a contract for an accepted design selection
+- **THEN** the Design agent uses the handoff tool and provides the artifact paths and acceptance flows without generating application code

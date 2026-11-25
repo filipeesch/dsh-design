@@ -290,6 +290,20 @@ describe('project payload safety', () => {
 })
 
 describe('agent tools', () => {
+  it('registers Design and handoff guidance in the design session scope', async () => {
+    const h = await harness()
+    const names = h.promptSections.map((section) => section.name)
+    expect(names).toContain('design:guidance')
+    expect(names).toContain('design:handoff')
+    const guidance = h.promptSections.find((section) => section.name === 'design:guidance')?.text ?? ''
+    const handoff = h.promptSections.find((section) => section.name === 'design:handoff')?.text ?? ''
+    expect(guidance).toContain('design_status')
+    expect(guidance).toContain('Variants')
+    expect(handoff).toContain('design_handoff')
+    expect(handoff).not.toContain('design_capture')
+    expect(handoff).toContain('manifest')
+  })
+
   it('reports a missing project and scaffolds one', async () => {
     const h = await harness({ withProject: false })
     h.registry.learnSession('one', h.root)

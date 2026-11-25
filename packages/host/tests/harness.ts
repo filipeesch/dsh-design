@@ -13,6 +13,7 @@ export interface HostHarness {
   readonly service: DesignService
   readonly routes: any[]
   readonly tools: Map<string, any>
+  readonly promptSections: any[]
   readonly handlers: Record<string, any>
   readonly sessions: Map<string, { id: string; header: { cwd?: string } }>
   readonly registry: ProjectRegistry
@@ -38,6 +39,7 @@ export async function createHarness(
   const routes: any[] = []
   const tools = new Map<string, any>()
   const handlers: Record<string, any> = {}
+  const promptSections: any[] = []
   const sessions = new Map<string, { id: string; header: { cwd?: string } }>()
   const disposers: (() => void)[] = []
   const webServer = {
@@ -57,7 +59,8 @@ export async function createHarness(
       },
     },
     systemPrompt: {
-      section() {
+      section(section: any) {
+        promptSections.push(section)
         return () => undefined
       },
       getSectionOrder() {
@@ -110,6 +113,7 @@ export async function createHarness(
     service,
     routes,
     tools,
+    promptSections,
     handlers,
     sessions,
     registry: service.registry!,
