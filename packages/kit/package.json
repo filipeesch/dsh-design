@@ -1,0 +1,32 @@
+{
+  "name": "@filipeesch/dsh-design-kit",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./meta": {
+      "types": "./lib/meta.d.ts",
+      "default": "./lib/meta.js"
+    }
+  },
+  "scripts": {
+    "build": "node ../../scripts/build.mjs --only kit",
+    "test": "vitest run --root ../.. packages/kit/tests --passWithNoTests"
+  },
+  "dependencies": {
+    "@filipeesch/dsh-design-core": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "react": "^19.3.1"
+  }
+}

@@ -1,0 +1,8 @@
+# The dsh-design bundle: host service, preset registration, and the client probe.
+- insert:
+    - id: design-host
+      name: ./lib/host.js
+    - id: design-preset
+      name: ./lib/preset.js
+    - id: design-client
+      name: ./lib/client-plugin/index.js

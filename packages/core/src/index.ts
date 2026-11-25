@@ -1,0 +1,12 @@
+/** Public surface of the design DSL core. */
+export * from './types.ts'
+export * from './diagnostics.ts'
+export * from './metadata.ts'
+export * from './parse.ts'
+export * from './tokens.ts'
+export * from './config.ts'
+export * from './css.ts'
+export * from './validate.ts'
+export * from './project.ts'
+export * from './scaffold.ts'
+export * from './view.ts'

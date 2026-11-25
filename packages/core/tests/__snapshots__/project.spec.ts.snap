@@ -1,0 +1,11 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`view projection > prints one line per node and closes overlays by default 1`] = `
+[
+  "<Screen #home title="Home">",
+  "  <Stack #0 gap="spacing.md">",
+  "    <Text #0.0> "Hello"",
+  "    <Button #open-filters onPress=open("filters")> "Filters"",
+  "  <Drawer #filters title="Filters"> (closed)",
+]
+`;

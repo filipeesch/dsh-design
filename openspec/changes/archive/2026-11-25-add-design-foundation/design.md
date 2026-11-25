@@ -106,7 +106,90 @@ The preset lists the default preset's child plugins plus the design tools plugin
 
 ### D14. Development installation by link
 
-During development the bundle is installed with `dsh plugin --profile <profile> add link:<checkout>/packages/bundle`, so rebuilding the packages is enough to pick up changes on restart. Installing from the git repository works the same way for other machines.
+During development the bundle is installed with `dsh plugin --profile <profile> add link:<checkout>/packages/bundle`, so rebuilding the packages is enough to pick up changes on restart.
+
+For a reproducible install on another machine, clone the repository, install and build it, pack the local artifact, and install that artifact:
+
+```sh
+git clone <repository> dsh-design
+cd dsh-design
+pnpm install
+pnpm run build
+pnpm run pack:bundle
+dsh plugin --profile <profile> add <checkout>/dist/filipeesch-dsh-design-bundle-0.1.0.tgz
+```
+
+No direct Git URL install was tested; the verified non-link path is the packed local artifact.
+
+## Spike findings (2026-11-24)
+
+The spike ran before any DSL or kit work, as required. Method: a temporary DSH home (`DSH_HOME=/tmp/dsh-design-home`), a fresh `web` profile, and the bundle installed with `dsh plugin --profile design-test add link:<this-repo>/packages/bundle`. A separate DSH process bound `127.0.0.1:3091`; the running GUI on 3080 was never touched. Owner authentication used the startup entry URL and its cookie.
+
+Confirmed:
+
+- **External package resolution (2.1).** Rows installed from a linked checkout resolve and load. The final host and preset plugins import no `@deepseek-ai/*` runtime module at all: the host is a plain Cordis plugin that provides `ctx.design`, and the tools build their own registry-ready definitions and context messages. This avoids private peer resolution entirely; only the host's `ctx` contract is used. The public repository therefore installs with plain `pnpm install`. Minimal ambient declarations cover the host's `ctx` surface for type checking (the design.md fallback for types).
+- **Preset-scoped tools (2.2).** The design session called `design_status` successfully. A session on the default `standard` preset reported exactly "design_status is not available". Tool registration is therefore preset-scoped as designed.
+- **Route and owner admission (2.3).** `GET /design/<session>/` returned 200 with the owner cookie and 401 without it; the asset and project endpoints behaved the same. A normal browser tab of the owner receives the cookie from the startup URL, so the short-lived-token fallback was not needed.
+- **Session to working directory (2.4).** The tool resolved `/private/tmp/design-sample-app` from the session's effective working directory (`workingDirectory.get`), and the route served the same session's project. macOS reports `/private/tmp` for `/tmp`, which matters for workspace and preview identity. A learned `sessionId -> cwd` map from tool executions is the implemented fallback when the session service is unavailable; parallel sessions in different repositories are verified in 7.4.
+- **Tool pipeline hooks (2.5).** Direct `edit` and an `edit` nested in `run_code` both surfaced the attached context to the model. The nested summary is aggregated onto the enclosing call and arrives as a harness-appended notice after the `run_code` result, not as a field in the program-visible value.
+- **Client contribution (2.6).** The client package loaded through `dsh.client` and its `sidebar.footer.action` entry ("Design") appeared in the Web GUI with no console errors. The later review round removed that dead action; the package now marks the document on activation, and loading is covered by a durable test plus a real-GUI check.
+- **Preset registry (2.7).** The registry has no extends/inherit operation, so the design preset copies the shipped `standard` composition (including the plan-mode section). It was listed as "Design" and activated without a broken diagnostic. A drift check against an installed standard preset remains a test obligation (10.1).
+- **Package identity for the client row.** A single package cannot host relative Loader rows plus a `dsh.client` contribution: the client-module scan resolves all rows of one package to the same manifest. The bundle therefore ships an embedded `client-plugin/` package (its own manifest and `./client` export) and keeps `host`, `tools`, and `preset` as relative rows of the bundle package. This is the concrete fallback for the client-module identity risk.
+- **No `@deepseek-ai/*` runtime imports.** `defineTool` and `createUserMessage` were replaced by a small local definition builder and message constructor. This also removed the need for private peer packages, which pnpm cannot resolve from a public registry (a linked bundle's peer resolution pulled unpublished `@deepseek-ai/dsh-type-meta`). The tools and auto-validation still run through the unmodified DSH tool pipeline.
+
+Temporary instrumentation used only for the spike (a fixed probe context behind an env var and a temporary PTC row) was removed after verification. The production automatic-validation path is D11 and is covered again by its own tests. Nothing was pushed, published, or archived, and the sample app used for the session lives under `/private/tmp/design-sample-app`.
+
+## Review remediation (independent review round)
+
+- **Owner enforcement.** The preview handler follows the open-in-app pattern:
+  `required` admission remains, and the handler rejects any peer whose principal
+  is not `owner` before reading content.
+- **Hosting split.** Trusted bundle assets stay on `_/assets`; project media is a
+  separate `_/files` route serving only signature-checked PNG/JPEG/GIF/WebP
+  under a size bound, canonical `realpath` confinement, sandbox CSP, `nosniff`,
+  no-store, and same-origin resource policy. SVG and arbitrary project files are
+  not served.
+- **One route source.** The renderer derives screen, breakpoint, and
+  deterministic mode from one external route store bound to `history`;
+  navigation, the picker, Back/Forward, deep links, and SSE revisions all read
+  the same source. Chrome is a responsive top bar, the canvas keeps its exact
+  configured width with stage scrolling, and overlays are absolute within the
+  canvas.
+- **Fatal errors.** The loader keeps screen identity and `lastValidRoot` by file
+  through a fatal parse error; invalid roots are omitted from the payload and
+  never rendered. Project-level config/token/kit errors block rendering.
+- **CSS and determinism.** Core owns one CSS declaration parser used by the
+  validator and renderer; declarations become authoritative node-scoped rules
+  with rebased local URLs. Deterministic mode serves one self-contained document
+  with inline project state, renderer assets, fonts, and bounded validated
+  raster bytes; it fixes the clock, disables transitions/SSE, and enforces a
+  connection-free CSP. Inter's bundled Latin `unicode-range` is documented;
+  fallback glyphs are not claimed as bundled.
+- **Packaging.** The linked checkout route remains; `pnpm run pack:bundle`
+  produces a self-contained tarball with host, preset, tools, embedded client,
+  renderer assets, fonts, and license. Both install paths and uninstall were
+  verified on fresh profiles.
+- **Scaffold refusal and confinement.** `scaffoldProject` itself resolves the
+  canonical cwd, checks the folder without following symlinks, returns on an
+  existing config before any side effect, validates an existing screens child
+  directory before claiming the config, and claims a new config with an
+  exclusive open before writing other files. Ownership is registered immediately
+  after each exclusive open, so a partial config or sibling write is rolled
+  back, including the owned config, while pre-existing content stays intact.
+  Handles close on every path and retries succeed after the conflict is cleared.
+  Concurrent calls have one winner; exclusive leaf creation is not treated as
+  directory confinement.
+- **Last valid only.** Reloads carry `lastValidRoot` only when a previous
+  load validated it; no invalid previous root is ever promoted.
+- **Modal focus.** The top dialog traps Tab/Shift+Tab, rejects focus moving to
+  the background, and restores the trigger on close; covered at phone and
+  desktop and across reload.
+- **Folder/cwd sharing.** Host, tools, auto-validation, preview routes, and
+  scaffolding all use the configured folder name and effective session cwd.
+  Folder names are constrained to one safe segment.
+- **Client proof.** The dead sidebar action was removed; the client module still
+  marks the document on activation, and a durable test plus real-GUI check
+  cover it.
 
 ## Risks / Trade-offs
 

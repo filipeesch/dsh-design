@@ -1,0 +1,22 @@
+{
+  "name": "@filipeesch/dsh-design-preset",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "scripts": {
+    "build": "node ../../scripts/build.mjs --only preset",
+    "test": "vitest run --root ../.. packages/preset/tests --passWithNoTests"
+  },
+  "dependencies": {
+    "@filipeesch/dsh-design-core": "workspace:*",
+    "@filipeesch/dsh-design-kit": "workspace:*"
+  }
+}

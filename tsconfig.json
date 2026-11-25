@@ -1,0 +1,12 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/core" },
+    { "path": "packages/kit" },
+    { "path": "packages/renderer" },
+    { "path": "packages/host" },
+    { "path": "packages/client" },
+    { "path": "packages/preset" },
+    { "path": "packages/bundle" }
+  ]
+}
