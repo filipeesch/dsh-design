@@ -303,6 +303,19 @@ describe('agent tools', () => {
     expect(handoff).toContain('manifest')
   })
 
+  it('registers static Design prompts as literal text without breaking DSX examples', async () => {
+    const h = await harness()
+    expect(h.promptSections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'design:guidance', interpolate: false }),
+        expect.objectContaining({ name: 'design:handoff', interpolate: false }),
+      ]),
+    )
+    const guidance = h.promptSections.find((section) => section.name === 'design:guidance')?.text
+    expect(guidance).toContain('direction={{ mobile: "column", desktop: "row" }}')
+    expect(guidance).toContain('states={{ "filter-open":')
+  })
+
   it('offers local preview and handoff without live app capture', async () => {
     const h = await harness()
     expect(h.tools.has('design_view')).toBe(true)

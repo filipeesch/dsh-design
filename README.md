@@ -51,10 +51,10 @@ dsh plugin --profile <profile> add https://github.com/filipeesch/dsh-design/rele
 ```
 
 The latest URL always serves the current latest stable release and is mutable.
-For a fixed version, use the version-specific asset URL; this is v0.1.0:
+For a fixed version, use the version-specific asset URL; this is v0.1.1:
 
 ```text
-https://github.com/filipeesch/dsh-design/releases/download/v0.1.0/dsh-design-bundle.tgz
+https://github.com/filipeesch/dsh-design/releases/download/v0.1.1/dsh-design-bundle.tgz
 ```
 
 Each release also publishes `dsh-design-bundle.tgz.sha256`. Releases do not
@@ -79,7 +79,7 @@ Reproducible local artifact (works from a fresh clone after `pnpm install`):
 
 ```sh
 pnpm run pack:bundle
-dsh plugin --profile <profile> add <checkout>/dist/filipeesch-dsh-design-bundle-0.1.0.tgz
+dsh plugin --profile <profile> add <checkout>/dist/filipeesch-dsh-design-bundle-0.1.1.tgz
 ```
 
 Either local route installs the same built bundle; the tarball does not require
@@ -112,7 +112,7 @@ dsh plugin --profile <profile> remove @filipeesch/dsh-design-bundle
 dsh plugin --profile <profile> add 'https://github.com/filipeesch/dsh-design/releases/download/<tag>/dsh-design-bundle.tgz'
 ```
 
-Replace `<tag>` with the new release tag (for example, `v0.1.0`).
+Replace `<tag>` with the new release tag (for example, `v0.1.1`).
 
 Remove and reinstall instead of reinstalling the mutable latest URL in place:
 this avoids a cached resolution of the same URL and keeps the installed version

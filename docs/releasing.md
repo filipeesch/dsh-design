@@ -92,8 +92,9 @@ done
 In a fresh disposable DSH web profile, paste the exact latest asset URL into
 **Plugins → Add plugin**. Wait for installation to finish, select **Enable now**
 if offered, then restart if required. Confirm the installed name and version, the Design preset,
-and the synthetic preview. No build-script approval is required. Stop the
-server after the check.
+and the synthetic preview. Verify that the first Design turn completes using a
+synthetic input and that DSH preserves the literal DSX examples in its prompt.
+No build-script approval is required. Stop the server after the check.
 
 If verification fails, do not advertise the new release as ready. If there is a
 previous known-good release, restore its latest marker. If the published bytes

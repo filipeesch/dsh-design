@@ -1,5 +1,17 @@
 # Verification evidence
 
+## First Design turn (v0.1.1)
+
+- The installed v0.1.0 bundle reproduced the prompt assembly error when DSH
+  treated a responsive DSX example as a prompt variable.
+- In the installed v0.1.1 bundle, DSH's prompt renderer preserved both the
+  responsive and named-state DSX examples as literal text and continued to
+  interpolate an ordinary model variable in a separate section.
+- A first Design turn in a disposable DSH Web profile passed the literal
+  examples and Design tools to a local test adapter and recorded a completed
+  turn. No external model or user profile was used.
+- `pnpm run check` passed all 325 tests in 25 files.
+
 ## GitHub Release distribution (add-github-release-distribution)
 
 - Published [v0.1.0](https://github.com/filipeesch/dsh-design/releases/tag/v0.1.0)

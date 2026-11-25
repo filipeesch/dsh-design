@@ -253,11 +253,13 @@ export function apply(ctx: any): void {
     name: 'design:guidance',
     order: 700,
     text: designPrompt(componentNames),
+    interpolate: false,
   })
   ctx.systemPrompt.section({
     name: 'design:handoff',
     order: 710,
     text: handoffPrompt(),
+    interpolate: false,
   })
 
   ctx.on('tools/execute', async (exec: any, next: () => Promise<any>) => {
