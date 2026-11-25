@@ -24,6 +24,11 @@ describe('design prompt', () => {
     expect(prompt).toContain('fixture(')
     expect(prompt).toContain('<Journey')
     expect(prompt).toContain('FICTITIOUS')
+    expect(prompt).toContain('Review comments')
+    expect(prompt).toContain('structural address')
+    expect(prompt).toContain('not versioned')
+    expect(prompt).toContain('rather than applying a comment to a different component')
+    expect(prompt).toContain('Screen, Stack')
   })
 
   it('keeps checks opt-in and fixtures fictitious', () => {

@@ -145,7 +145,7 @@ async function buildClientBundle(outfile, id) {
     format: 'cjs',
     platform: 'browser',
     target: 'es2020',
-    external: ['react', 'react-dom', '@deepseek-ai/*'],
+    external: ['react', 'react-dom', 'react/jsx-runtime', '@deepseek-ai/*'],
     jsx: 'automatic',
     entryPoints: [resolve(pkg('client'), 'src/client.tsx')],
     logLevel: 'warning',

@@ -4,6 +4,58 @@ Checks run while implementing `add-design-journeys-and-checks` on top of the
 `add-design-foundation` baseline. Paths are portable placeholders; no owner
 token, real session id, temporary home, or machine-specific path is recorded.
 
+## Design panel and review comments (add-design-panel-and-comments)
+
+Checks run on the packed bundle for this change. The disposable profile used a
+separate loopback port; the live GUI on 3080 and the DSH checkout were not
+modified. The repeatable procedure and manual desktop/mobile steps are in
+[`docs/review/panel-review.md`](review/panel-review.md).
+
+```sh
+pnpm run check
+openspec validate add-design-panel-and-comments --strict
+pnpm run pack:bundle
+```
+
+Results:
+
+- `pnpm run check` exits 0: build, compile-time type tests, ESLint, Prettier,
+  EOF newline, and Vitest. Vitest reports 18 files and 221 tests passed,
+  including the real Chromium preview and headless-check suites.
+- `openspec validate add-design-panel-and-comments --strict` reports
+  `Change 'add-design-panel-and-comments' is valid`.
+- `pnpm run pack:bundle` writes
+  `dist/filipeesch-dsh-design-bundle-0.1.0.tgz` (sha256
+  `17b9ae3c0ef330d7096cce3fb486b5fbd20346fdf5767bc465e65bb433145bd2`).
+- The packed artifact was installed into a fresh disposable profile and booted
+  on a non-3080 loopback port. `docs/review/panel-check.mjs` reported
+  `{"ok":true,"failures":[]}` with evidence: a desktop panel frame of 647 CSS
+  pixels, zero page-wide horizontal overflow on desktop and at 390 CSS pixels,
+  one chat message after an accepted retry, a 390-pixel phone frame, zero
+  comment requests from the deterministic preview, and anonymous preview
+  refused with 401. The report and the boot log carried no credential or
+  machine-specific path.
+- The same run exercised: a panel draft surviving a browser reload with its pin
+  reattached, a separate tab reading that draft, a second tab draft reflected
+  back in the panel after focus, a second session over the same project with
+  `Pending (0)`, one simulated delivery rejection that retained both drafts,
+  one accepted retry that cleared them, an open-drawer selection with composer
+  focus, a phone draft add/remove, return to chat, and the deterministic
+  no-comment check.
+- Targeted regressions cover: keyboard entry from the focused Comment control,
+  arrow-key selection, Enter on a non-focusable structural node, Escape closing
+  the composer rather than the drawer, focus restoration, Tab trapped inside
+  the review surface while the drawer's modal trap stays intact, structural
+  anchors keyed to a rendered-content fingerprint so unchanged content survives
+  an idle runtime revision reset while a same-address edit does not reattach,
+  stable anchors surviving revisions, hidden targets remaining unanchored,
+  screen/state mismatch versus unresolved status, selection-time context capture, the
+  50-draft/50-version limit, accepted-version success copy when a draft is
+  edited in flight, concurrent same-request-id submissions, later drafts kept
+  across replay, retry after an explicit rejection, and a fake-timer/runtime
+  regression proving revision 1 is reused after idle eviction while the
+  unchanged content fingerprint stays stable.
+
 ## Quality gate
 
 ```sh

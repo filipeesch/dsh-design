@@ -3,6 +3,7 @@ import { join, resolve } from 'node:path'
 import { normalizeFolderName } from '@filipeesch/dsh-design-core'
 import { KIT_VERSION, kitMetadata } from '@filipeesch/dsh-design-kit/meta'
 import { BrowserSessions } from './browser.ts'
+import { CommentStore, type CommentPromptPort } from './comments.ts'
 import { ProjectRegistry } from './registry.ts'
 import { createRouteHandler, defaultAssetsDir } from './routes.ts'
 
@@ -42,6 +43,8 @@ export class DesignService {
   readonly browsers: BrowserSessions
   /** Built renderer assets used by deterministic checks. */
   readonly assetsDir: string
+  /** In-memory review comments and submission receipts, keyed by session. */
+  readonly comments: CommentStore
   /** Overall timeout for one headless check. */
   readonly browserTimeoutMs: number
   private readonly ctx: any
@@ -63,6 +66,7 @@ export class DesignService {
       debounceMs: config.debounceMs ?? 50,
       idleStopMs: config.idleStopMs ?? 5 * 60 * 1000,
     }
+    this.comments = new CommentStore({ prompt: () => this.promptPort() })
     this.registry = new ProjectRegistry({
       ...settings,
       kit: kitMetadata,
@@ -106,13 +110,44 @@ export class DesignService {
     return this.registry?.previewUrl(sessionId, screen) ?? ''
   }
 
-  /** Release one session's browser; safe when none was launched. */
+  /** Release one session's browser and pending comments; safe when none exist. */
   async disposeSession(sessionId: string): Promise<void> {
+    this.comments.clearSession(sessionId)
     await this.browsers.disposeSession(sessionId)
   }
 
-  /** Release every browser and project runtime. */
+  /** Resolve the host prompt face lazily, so a late controller is still used. */
+  private promptPort(): CommentPromptPort | undefined {
+    let controller: any
+    try {
+      controller = this.ctx.get?.('sessionController') ?? this.ctx.sessionController
+    } catch {
+      controller = undefined
+    }
+    if (controller === undefined || typeof controller.prompt !== 'function') return undefined
+    return {
+      async prompt(request, signal) {
+        const result = await controller.prompt(
+          {
+            requestId: request.requestId,
+            sessionId: request.sessionId,
+            mode: request.mode,
+            content: request.content,
+          },
+          signal,
+        )
+        if (result !== null && typeof result === 'object' && 'ok' in result && result.ok === false) {
+          return result as { ok: false; error: { code: string; message: string } }
+        }
+        if (result !== null && typeof result === 'object' && result.accepted === true) return { accepted: true }
+        return { ok: false, error: { code: 'not-accepted', message: 'the session did not accept the prompt' } }
+      },
+    }
+  }
+
+  /** Release every browser, project runtime, and pending comment. */
   async dispose(): Promise<void> {
+    this.comments.dispose()
     this.registry?.dispose()
     await this.browsers.disposeAll()
   }
@@ -148,7 +183,7 @@ export function apply(ctx: any, config: DesignConfig = {}): void {
         webServer.register({
           kind: 'prefix',
           path: '/design',
-          handler: createRouteHandler(service.registry!),
+          handler: createRouteHandler(service.registry!, service.assetsDir, service.comments),
         }),
       'design: preview route',
     )

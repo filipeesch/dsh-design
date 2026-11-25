@@ -3,9 +3,10 @@ import { createServer, type Server } from 'node:http'
 import { access, readFile, readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { extname, join, resolve } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { chromium, type Browser, type Page } from 'playwright-core'
 import { parseScreen } from '../../core/src/parse.ts'
+import { fingerprintDesignTree } from '../../core/src/fingerprint.ts'
 import { deterministicDocument } from '../../host/src/deterministic.ts'
 import type { NamedState } from '@filipeesch/dsh-design-core'
 import type { ProjectPayload, WireScreen } from '../src/wire.ts'
@@ -129,6 +130,37 @@ let current: ProjectPayload = payload(1, [
 ])
 const streams = new Set<import('node:http').ServerResponse>()
 
+interface BrowserDraft {
+  id: string
+  revision: number
+  text: string
+  anchor: { id: string; kind: 'stable' | 'structural'; type: string; revision: number }
+  context: { screen: string; breakpoint: string; state?: string; overlays: string[]; tabs: Record<string, string> }
+  createdAt: number
+  updatedAt: number
+}
+
+let comments: BrowserDraft[] = []
+let commentSequence = 1
+let commentRevision = 0
+
+function commentSnapshot(): Record<string, unknown> {
+  return { session: 'session-test', revision: commentRevision, drafts: comments.map((draft) => ({ ...draft })) }
+}
+
+beforeEach(() => {
+  comments = []
+  commentSequence = 1
+  commentRevision = 0
+})
+
+async function readBody(req: import('node:http').IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = []
+  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+  const text = Buffer.concat(chunks).toString('utf8')
+  return text === '' ? undefined : JSON.parse(text)
+}
+
 function publish(next: ProjectPayload): void {
   current = next
   for (const stream of streams)
@@ -152,6 +184,55 @@ beforeAll(async () => {
   server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://test')
     const apiPath = url.pathname.replace(/^\/design\/session-test/, '')
+    if (apiPath === '/_/comments') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(commentSnapshot()))
+      return
+    }
+    if (apiPath.startsWith('/_/comments/')) {
+      const action = apiPath.slice('/_/comments/'.length)
+      const body = (await readBody(req)) as any
+      if (req.method !== 'POST' || body === undefined) {
+        res.writeHead(400).end()
+        return
+      }
+      if (action === 'create') {
+        const draft: BrowserDraft = {
+          id: 'comment-' + String(commentSequence++),
+          revision: 1,
+          text: body.text,
+          anchor: body.anchor,
+          context: body.context,
+          createdAt: 1,
+          updatedAt: 1,
+        }
+        comments.push(draft)
+        commentRevision += 1
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(commentSnapshot()))
+        return
+      }
+      if (action === 'update' || action === 'remove') {
+        const draft = comments.find((candidate) => candidate.id === body.id)
+        if (draft === undefined || draft.revision !== body.revision) {
+          res.writeHead(409, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'stale', message: 'comment changed' }))
+          return
+        }
+        if (action === 'update') {
+          draft.text = body.text
+          draft.revision += 1
+        } else {
+          comments = comments.filter((candidate) => candidate.id !== body.id)
+        }
+        commentRevision += 1
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(commentSnapshot()))
+        return
+      }
+      res.writeHead(404).end()
+      return
+    }
     if (apiPath === '/_/project') {
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify(current))
@@ -512,8 +593,145 @@ describe('real browser preview regressions', async () => {
   )
 
   it.skipIf(chromiumPath === undefined)(
+    'drives comment keyboard entry, selection, escape, and focus restore with the drawer open',
+    async () => {
+      current = allScreens(30)
+      const page = await pageAt({ width: 1440, height: 900 }, '/design/session-test/checkout?bp=desktop')
+      try {
+        await page.getByRole('button', { name: 'Filters' }).click()
+        await page.getByRole('dialog').waitFor({ state: 'visible' })
+        const toggle = page.getByRole('button', { name: 'Comment', exact: true })
+        await toggle.focus()
+        await page.keyboard.press('Enter')
+        await page.waitForFunction(() => document.querySelector('[data-dsx-review-target]') !== null)
+        await page.keyboard.press('ArrowDown')
+        await page.keyboard.press('Enter')
+        const composer = page.locator('.dsx-review-composer')
+        await composer.waitFor({ state: 'visible' })
+        const context = await composer.locator('.dsx-review-context').first().textContent()
+        expect(context ?? '').not.toContain('Screen · #')
+        expect(context ?? '').toContain('unstable address')
+        expect(await page.evaluate(() => document.activeElement?.getAttribute('aria-label'))).toBe('Comment text')
+        for (let index = 0; index < 5; index += 1) {
+          await page.keyboard.press('Tab')
+          expect(await page.evaluate(() => document.activeElement?.closest('.dsx-review') !== null)).toBe(true)
+        }
+        await page.keyboard.press('Escape')
+        await page.waitForFunction(() => document.querySelector('.dsx-review-composer') === null)
+        expect(await page.getByRole('dialog').count()).toBe(1)
+        expect(
+          await page.evaluate(
+            () =>
+              document.activeElement?.closest('.dsx-review') !== null ||
+              document.activeElement?.closest('[role="dialog"]') !== null,
+          ),
+        ).toBe(true)
+        await toggle.click()
+        await page.waitForFunction(() => document.querySelector('[data-dsx-review-target]') !== null)
+        await page.keyboard.press('Escape')
+        await page.waitForFunction(() => document.querySelector('[data-dsx-review-target]') === null)
+        expect((await toggle.textContent())?.trim()).toBe('Comment')
+        expect(await page.getByRole('dialog').count()).toBe(1)
+        expect(await page.evaluate(() => document.activeElement?.closest('[data-dsx-review-toggle]') !== null)).toBe(
+          true,
+        )
+        await page.keyboard.press('Escape')
+        await page.waitForFunction(() => document.querySelector('[role="dialog"]') === null)
+      } finally {
+        await page.context().close()
+      }
+    },
+  )
+
+  it.skipIf(chromiumPath === undefined)(
+    'keeps structural pins through an idle revision reset and drops them when same-address content is edited',
+    async () => {
+      const checkout = screen('checkout', checkoutSource)
+      const fingerprint = fingerprintDesignTree(checkout.root!)
+      current = payload(40, [screen('home', homeSource), checkout, screen('stated', statedSource, statedStates)])
+      comments = [
+        {
+          id: 'stable-comment',
+          revision: 1,
+          text: 'Filter note',
+          anchor: { id: 'open-filters', kind: 'stable', type: 'Button', revision: 40 },
+          context: { screen: 'checkout', breakpoint: 'desktop', overlays: [], tabs: {} },
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ]
+      const page = await pageAt({ width: 1440, height: 900 }, '/design/session-test/checkout?bp=desktop')
+      try {
+        await page.waitForFunction(() => document.querySelectorAll('.dsx-pin').length === 1)
+        // Create the structural draft through the ordinary review flow.
+        await page.getByRole('button', { name: 'Comment', exact: true }).click()
+        await page.locator('[data-dsx-type="Header"]').click()
+        await page.getByRole('textbox', { name: 'Comment text' }).fill('Header note')
+        await page.getByRole('button', { name: 'Save comment' }).click()
+        await page.waitForFunction(() => document.querySelectorAll('.dsx-pin').length === 2)
+        const created = comments.find((draft) => draft.id !== 'stable-comment')
+        expect(created?.anchor.fingerprint).toBe(fingerprint)
+        // A recreated runtime counts from revision 1 again; the unchanged content
+        // fingerprint must keep the structural pin.
+        current = payload(1, [screen('home', homeSource), checkout, screen('stated', statedSource, statedStates)])
+        await page.reload({ waitUntil: 'domcontentloaded' })
+        await page.waitForSelector('.dsx-frame')
+        await page.waitForFunction(() => document.querySelectorAll('.dsx-pin').length === 2)
+        const edited = screen(
+          'checkout',
+          checkoutSource.replace('<Header title="Checkout" />', '<Header title="Checkout edited" />'),
+        )
+        current = payload(2, [screen('home', homeSource), edited, screen('stated', statedSource, statedStates)])
+        publish(current)
+        await page.waitForFunction(() => document.querySelectorAll('.dsx-pin').length === 1)
+        await page.getByRole('button', { name: /Pending \(2\)/ }).click()
+        await page.getByText('content changed').waitFor({ state: 'visible' })
+        expect(await page.getByText('unanchored').count()).toBe(0)
+        await page.reload({ waitUntil: 'domcontentloaded' })
+        await page.waitForSelector('.dsx-frame')
+        await page.waitForFunction(() => document.querySelectorAll('.dsx-pin').length === 1)
+        await page.getByRole('button', { name: /Pending \(2\)/ }).click()
+        await page.getByText('content changed').waitFor({ state: 'visible' })
+        expect(await page.locator('.dsx-pin').count()).toBe(1)
+      } finally {
+        await page.context().close()
+      }
+    },
+  )
+
+  it.skipIf(chromiumPath === undefined)('does not pin a comment whose target is hidden', async () => {
+    current = payload(50, [
+      screen(
+        'home',
+        '<Screen id="home" title="Home"><Stack gap="spacing.md"><Box id="hidden" css="display: none"><Text>Hidden text</Text></Box><Text>Visible text</Text></Stack></Screen>',
+      ),
+    ])
+    comments = [
+      {
+        id: 'hidden-comment',
+        revision: 1,
+        text: 'Hidden note',
+        anchor: { id: 'hidden', kind: 'stable', type: 'Box', revision: 50 },
+        context: { screen: 'home', breakpoint: 'desktop', overlays: [], tabs: {} },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]
+    const page = await pageAt({ width: 1440, height: 900 }, '/design/session-test/')
+    try {
+      await page.getByText('Visible text').waitFor({ state: 'visible' })
+      expect(await page.locator('.dsx-pin').count()).toBe(0)
+      await page.getByRole('button', { name: /Pending \(1\)/ }).click()
+      await page.getByText('unanchored').waitFor({ state: 'visible' })
+    } finally {
+      await page.context().close()
+    }
+  })
+
+  it.skipIf(chromiumPath === undefined)(
     'serves a self-contained deterministic document with no further requests',
     async () => {
+      current = allScreens(20)
       const load = async (): Promise<{ page: Page; html: string; rects: number[][] }> => {
         const page = await pageAt(
           { width: 1440, height: 900 },

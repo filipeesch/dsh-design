@@ -3,9 +3,9 @@ import { fileURLToPath } from 'node:url'
 import { mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createHarness, callTool, runPipeline, writeScreen, type HostHarness } from './harness.ts'
-import { scaffoldProject } from '@filipeesch/dsh-design-core'
+import { fingerprintDesignTree, scaffoldProject } from '@filipeesch/dsh-design-core'
 import { apply as applyHost } from '../src/index.ts'
 
 const harnesses: HostHarness[] = []
@@ -84,6 +84,33 @@ describe('project registry and watcher', () => {
     expect(cache.get('screens/home.dsx')?.mtimeMs).not.toBe(before)
     expect(cache.size).toBe(1)
     expect(first.screens[0]?.id).toBe('home')
+  })
+
+  it('resets the revision after idle eviction while unchanged content keeps its fingerprint', async () => {
+    const h = await harness()
+    vi.useFakeTimers()
+    try {
+      h.registry.learnSession('one', h.root)
+      const first = (await h.registry.forSession('one'))!
+      const projectA = await first.get()
+      expect(first.currentRevision).toBe(1)
+      const fingerprintA = fingerprintDesignTree(projectA.screens[0]!.root!)
+      const unsubscribe = first.subscribe(() => undefined)
+      unsubscribe()
+      await vi.advanceTimersByTimeAsync(120)
+      expect(h.registry.size).toBe(0)
+      const second = (await h.registry.forSession('one'))!
+      expect(second).not.toBe(first)
+      const projectB = await second.get()
+      expect(second.currentRevision).toBe(1)
+      expect(fingerprintDesignTree(projectB.screens[0]!.root!)).toBe(fingerprintA)
+      await writeScreen(h.root, 'home.dsx', '<Screen id="home"><Text>Edited after idle</Text></Screen>')
+      const projectC = await second.reload()
+      expect(second.currentRevision).toBe(2)
+      expect(fingerprintDesignTree(projectC.screens[0]!.root!)).not.toBe(fingerprintA)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('stops the watcher after the idle window', async () => {

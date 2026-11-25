@@ -1,17 +1,12 @@
 /** Compact DSL guidance for the `design` preset (under 6,000 characters). */
-import { componentNames, kitMetadata } from '@filipeesch/dsh-design-kit/meta'
+import { componentNames } from '@filipeesch/dsh-design-kit/meta'
 
 /**
  * Build the design prompt section. It points at `design_catalog` for prop
  * details instead of embedding per-component prop tables.
  */
 export function designPrompt(): string {
-  const index = componentNames
-    .map((name) => {
-      const meta = kitMetadata[name] as { description: string }
-      return name + ': ' + meta.description
-    })
-    .join('\n')
+  const index = componentNames.join(', ')
   return [
     '## Design mode',
     '',
@@ -35,7 +30,9 @@ export function designPrompt(): string {
     '',
     'Checks: before declaring a flow working, run `design_run_journey` for relevant journeys and `design_lint` for affected screens. Lint reports measured overflow, overlap, clipped text, tap targets under 44px, and off-token warnings across breakpoints. Use `design_screenshot` only when visual evidence is needed; it writes a PNG under `design/.cache/`. `design_view` with `breakpoint` returns measured boxes; without it, it stays browser-free. `design_query` finds nodes by component, scalar prop, or id glob without a browser. Do not turn checks into a mandatory checklist.',
     '',
-    'Component index (details: `design_catalog({ name })`):',
+    'Review comments: the interactive preview has a Comment mode. The user can pin comments to rendered components and send the batch as one ordinary message. Each item names the screen, breakpoint, component type, a stable design id or a structural address marked unstable, the named state and active overlays/tabs, and the design revision. Locate each component with `design_view` or `design_query` using that context, apply the change to the design text, and reply per numbered comment saying what changed or what could not be located. Structural addresses and older revisions may be stale: use the available context or ask a clarifying question rather than applying a comment to a different component. Comment drafts are not versioned and are not available to tools before the user sends them.',
+    '',
+    'Component index (descriptions and props: `design_catalog({ name })`):',
     index,
   ].join('\n')
 }

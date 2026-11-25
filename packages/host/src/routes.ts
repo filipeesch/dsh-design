@@ -4,6 +4,14 @@ import { readFile, realpath, stat } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { extname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {
+  COMMENT_BODY_MAX,
+  parseCommentCreate,
+  parseCommentRemove,
+  parseCommentSubmit,
+  parseCommentUpdate,
+} from '@filipeesch/dsh-design-core'
+import { CommentStore, CommentStoreError } from './comments.ts'
 import { collectDeterministicAssets, deterministicDocument } from './deterministic.ts'
 import { notFoundPage, renderShell } from './html.ts'
 import { MAX_MEDIA_BYTES, RASTER_TYPES, sniffRaster } from './media.ts'
@@ -68,10 +76,208 @@ function send(
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'no-referrer',
+    'x-frame-options': 'SAMEORIGIN',
     ...extra,
   })
   if (head) res.end()
   else res.end(bytes)
+}
+
+/** Request body exceeded the bounded JSON limit. */
+class BodyLimitError extends Error {}
+
+/** Request body was not valid JSON. */
+class InvalidJsonError extends Error {}
+
+/** Header that proves a comment mutation used a deliberate script request. */
+const COMMENT_INTENT_HEADER = 'x-dsh-design-comments'
+
+/** Send a JSON response with the same no-store policy as the rest of the route. */
+function sendJson(res: ServerResponse, status: number, value: unknown, head = false): void {
+  const body = Buffer.from(JSON.stringify(value))
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': String(body.length),
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
+  })
+  if (head) res.end()
+  else res.end(body)
+}
+
+/** Read a bounded JSON object from a mutation request. */
+async function readJsonBody(req: IncomingMessage, limit: number): Promise<unknown> {
+  const declared = req.headers['content-length']
+  if (typeof declared === 'string' && Number(declared) > limit) throw new BodyLimitError()
+  const chunks: Buffer[] = []
+  let total = 0
+  for await (const chunk of req) {
+    const buffer = typeof chunk === 'string' ? Buffer.from(chunk) : chunk
+    total += buffer.length
+    if (total > limit) throw new BodyLimitError()
+    chunks.push(buffer)
+  }
+  if (total === 0) throw new InvalidJsonError()
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
+  } catch {
+    throw new InvalidJsonError()
+  }
+}
+
+/** Whether a mutation carries deliberate same-origin JSON intent. */
+function deliberateMutation(req: IncomingMessage): 'ok' | 'intent' | 'origin' | 'type' {
+  if (req.headers[COMMENT_INTENT_HEADER] !== '1') return 'intent'
+  const site = req.headers['sec-fetch-site']
+  if (typeof site === 'string' && site !== '' && site !== 'same-origin') return 'origin'
+  const origin = req.headers.origin
+  if (typeof origin === 'string' && origin !== '') {
+    try {
+      if (new URL(origin).host !== req.headers.host) return 'origin'
+    } catch {
+      return 'origin'
+    }
+  }
+  const type = req.headers['content-type']
+  if (typeof type !== 'string' || type.split(';')[0]?.trim().toLowerCase() !== 'application/json') return 'type'
+  return 'ok'
+}
+
+/** Answer one comment store failure as a bounded JSON error. */
+function sendCommentError(res: ServerResponse, error: unknown, head: boolean): void {
+  if (!(error instanceof CommentStoreError)) {
+    sendJson(res, 500, { error: 'internal', message: 'comment service failed' }, head)
+    return
+  }
+  const status =
+    error.code === 'not-found'
+      ? 404
+      : error.code === 'stale' || error.code === 'limit'
+        ? 409
+        : error.code === 'delivery-unavailable'
+          ? 503
+          : 502
+  sendJson(res, status, { error: error.code, message: error.message, retryable: error.retryable }, head)
+}
+
+/**
+ * Serve the owner-only comment surface for one authorized session.
+ *
+ * The session identity always comes from the route. Reads are plain GET; every
+ * mutation requires a JSON body, a deliberate custom header (which a cross-site
+ * form cannot set without a CORS preflight), and same-origin request metadata
+ * when the browser supplies it.
+ */
+async function handleComments(
+  req: IncomingMessage,
+  res: ServerResponse,
+  head: boolean,
+  session: string,
+  store: CommentStore,
+  rest: readonly string[],
+): Promise<void> {
+  const method = req.method ?? 'GET'
+  if (rest.length === 1) {
+    if (method !== 'GET' && method !== 'HEAD') {
+      sendJson(res, 405, { error: 'method-not-allowed', message: 'use GET to list comments' }, head)
+      return
+    }
+    sendJson(res, 200, store.snapshot(session), head)
+    return
+  }
+  if (rest.length !== 2 || method !== 'POST') {
+    sendJson(res, 404, { error: 'not-found', message: 'unknown comment endpoint' }, head)
+    return
+  }
+  const action = rest[1]
+  if (action !== 'create' && action !== 'update' && action !== 'remove' && action !== 'submit') {
+    sendJson(res, 404, { error: 'not-found', message: 'unknown comment endpoint' }, head)
+    return
+  }
+  const intent = deliberateMutation(req)
+  if (intent === 'intent') {
+    sendJson(res, 403, { error: 'intent-required', message: 'comment mutations need an explicit review request' }, head)
+    return
+  }
+  if (intent === 'origin') {
+    sendJson(res, 403, { error: 'cross-origin', message: 'comment mutations must come from this origin' }, head)
+    return
+  }
+  if (intent === 'type') {
+    sendJson(res, 415, { error: 'json-required', message: 'comment mutations require application/json' }, head)
+    return
+  }
+  let body: unknown
+  try {
+    body = await readJsonBody(req, COMMENT_BODY_MAX)
+  } catch (error) {
+    if (error instanceof BodyLimitError) {
+      sendJson(res, 413, { error: 'payload-too-large', message: 'comment request body is too large' }, head)
+      return
+    }
+    sendJson(res, 400, { error: 'invalid-json', message: 'comment request body must be a JSON object' }, head)
+    return
+  }
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    sendJson(res, 400, { error: 'invalid', message: 'comment request body must be a JSON object' }, head)
+    return
+  }
+  if ('session' in body) {
+    sendJson(res, 400, { error: 'invalid', message: 'session identity comes from the route, not the body' }, head)
+    return
+  }
+  try {
+    if (action === 'create') {
+      const parsed = parseCommentCreate(body)
+      if (!parsed.ok) {
+        sendJson(res, 400, { error: 'invalid', message: parsed.error }, head)
+        return
+      }
+      sendJson(res, 200, store.create(session, parsed.value), head)
+      return
+    }
+    if (action === 'update') {
+      const parsed = parseCommentUpdate(body)
+      if (!parsed.ok) {
+        sendJson(res, 400, { error: 'invalid', message: parsed.error }, head)
+        return
+      }
+      sendJson(res, 200, store.update(session, parsed.value), head)
+      return
+    }
+    if (action === 'remove') {
+      const parsed = parseCommentRemove(body)
+      if (!parsed.ok) {
+        sendJson(res, 400, { error: 'invalid', message: parsed.error }, head)
+        return
+      }
+      sendJson(res, 200, store.remove(session, parsed.value), head)
+      return
+    }
+    const parsed = parseCommentSubmit(body)
+    if (!parsed.ok) {
+      sendJson(res, 400, { error: 'invalid', message: parsed.error }, head)
+      return
+    }
+    const result = await store.submit(session, parsed.value.requestId, parsed.value.versions)
+    sendJson(
+      res,
+      200,
+      {
+        accepted: true,
+        requestId: result.requestId,
+        acceptedAt: result.acceptedAt,
+        replayed: result.replayed,
+        versions: result.versions,
+        cleared: result.cleared,
+        snapshot: result.snapshot,
+      },
+      head,
+    )
+  } catch (error) {
+    sendCommentError(res, error, head)
+  }
 }
 
 /** Normalize a decoded request path into safe segments. */
@@ -226,6 +432,7 @@ async function serveProjectMedia(res: ServerResponse, folder: string, requested:
 export function createRouteHandler(
   registry: ProjectRegistry,
   assetsDir = defaultAssetsDir(),
+  comments?: CommentStore,
 ): (req: IncomingMessage, res: ServerResponse, peer?: { principal?: { kind?: string } }) => Promise<void> {
   return async (req, res, peer) => {
     const head = req.method === 'HEAD'
@@ -257,6 +464,11 @@ export function createRouteHandler(
       return
     }
     const rest = parts.slice(2)
+
+    if (rest[0] === '_' && rest[1] === 'comments' && comments !== undefined) {
+      await handleComments(req, res, head, session, comments, rest.slice(1))
+      return
+    }
 
     if (rest[0] === '_') {
       const endpoint = rest[1]
@@ -379,11 +591,15 @@ export function createRouteHandler(
         send(res, 200, document.html, 'text/html; charset=utf-8', head, {
           'content-security-policy': document.csp,
           'cross-origin-resource-policy': 'same-origin',
+          'x-frame-options': 'DENY',
         })
         return
       }
       const html = await renderShell(assetsDir, session)
-      send(res, 200, html, 'text/html; charset=utf-8', head)
+      send(res, 200, html, 'text/html; charset=utf-8', head, {
+        'content-security-policy': "frame-ancestors 'self'",
+        'cross-origin-resource-policy': 'same-origin',
+      })
     } catch (error) {
       send(
         res,

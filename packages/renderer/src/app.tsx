@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   collectCssRules,
   countDiagnostics,
+  fingerprintDesignTree,
   type Breakpoint,
   type DesignChild,
   type DesignElement,
@@ -14,6 +15,7 @@ import { fetchProject, subscribeRevisions } from './api.ts'
 import { renderNode } from './interpreter.tsx'
 import { getRoute, navigateRoute, selectBreakpoint, useRoute } from './route.ts'
 import { emptyState, filterState, loadState, saveState, seedState, type PreviewState } from './state.ts'
+import { ReviewOverlay } from './review.tsx'
 import type { ProjectPayload, WireScreen } from './wire.ts'
 
 /** Clock value used in deterministic mode. */
@@ -39,6 +41,14 @@ export function App() {
   const [loadError, setLoadError] = useState<string | undefined>()
   const [state, setState] = useState<PreviewState>(() => emptyState())
   const [ready, setReady] = useState(bootstrap !== undefined)
+  const [frameElement, setFrameElement] = useState<HTMLDivElement | null>(null)
+  const [barHost, setBarHost] = useState<HTMLDivElement | null>(null)
+  const attachFrame = useCallback((node: HTMLDivElement | null) => {
+    setFrameElement(node)
+  }, [])
+  const attachBar = useCallback((node: HTMLDivElement | null) => {
+    setBarHost(node)
+  }, [])
   const revision = useRef(bootstrap?.revision ?? -1)
   const lastTrees = useRef(new Map<string, DesignScreenNode>())
   const appliedSeed = useRef<string | undefined>(undefined)
@@ -124,8 +134,13 @@ export function App() {
   const retainedRoot =
     activeScreen === undefined ? undefined : (activeScreen.lastValidRoot ?? lastTrees.current.get(activeScreen.id))
   const tree = projectFatal || missingScreen ? undefined : (currentRoot ?? retainedRoot)
+  const treeFingerprint = useMemo(() => (tree === undefined ? undefined : fingerprintDesignTree(tree)), [tree])
   const screenStates = activeScreen?.states ?? []
   const unknownState = route.state !== undefined && !screenStates.some((candidate) => candidate.name === route.state)
+  const appliedState =
+    route.state !== undefined && screenStates.some((candidate) => candidate.name === route.state)
+      ? route.state
+      : undefined
 
   // A named state seeds only on a screen/state route transition, never on a
   // breakpoint change or a valid hot reload that leaves the route unchanged.
@@ -161,6 +176,19 @@ export function App() {
     }
     return set
   }, [state.openOverlays, screenId])
+  const overlayList = useMemo(() => [...openOverlays].sort((left, right) => left.localeCompare(right)), [openOverlays])
+  const tabSelections = useMemo(() => {
+    const selections: Record<string, string> = {}
+    if (screenId === undefined) return selections
+    const prefix = screenId + '/'
+    for (const [key, value] of Object.entries(state.tabs)) {
+      if (!key.startsWith(prefix)) continue
+      const node = key.slice(prefix.length)
+      if (node === '' || node.startsWith('radio:')) continue
+      selections[node] = value
+    }
+    return selections
+  }, [state.tabs, screenId])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -307,6 +335,7 @@ export function App() {
             </button>
           ))}
         </div>
+        <div className="dsx-review-slot" ref={attachBar} />
         <div className="dsx-meta">
           <span>kit {project.kitVersion}</span>
           <span>rev {project.revision}</span>
@@ -349,6 +378,7 @@ export function App() {
           <div className="dsx-frame-wrap">
             <div
               className="dsx-frame"
+              ref={attachFrame}
               data-breakpoint={frame.name}
               data-screen={screenId ?? ''}
               style={{ width: frame.width, minHeight: 520 }}
@@ -409,6 +439,20 @@ export function App() {
           </div>
         ) : null}
       </main>
+      {!route.deterministic && tree !== undefined && frame !== undefined && screenId !== undefined ? (
+        <ReviewOverlay
+          session={session}
+          screen={screenId}
+          revision={project.revision}
+          breakpoint={breakpointName}
+          {...(appliedState === undefined ? {} : { state: appliedState })}
+          overlays={overlayList}
+          tabs={tabSelections}
+          frame={frameElement}
+          {...(treeFingerprint === undefined ? {} : { fingerprint: treeFingerprint })}
+          barHost={barHost}
+        />
+      ) : null}
     </div>
   )
 }

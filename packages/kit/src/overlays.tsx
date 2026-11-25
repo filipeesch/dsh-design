@@ -46,17 +46,39 @@ function OverlayShell({
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : undefined
     let active = true
     const isTop = (): boolean => {
-      const dialogs = [...document.querySelectorAll('[role="dialog"]')]
+      // Only modal dialogs compete for "top"; a non-modal review composer must
+      // not disable the drawer's focus trap while it is open.
+      const dialogs = [...document.querySelectorAll('[role="dialog"][aria-modal="true"]')]
       return dialogs.at(-1) === dialog
     }
-    const focusable = (): HTMLElement[] =>
+    const focusableWithin = (root: HTMLElement): HTMLElement[] =>
       [
-        ...dialog.querySelectorAll<HTMLElement>(
+        ...root.querySelectorAll<HTMLElement>(
           'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
         ),
       ].filter((element) => element.getClientRects().length > 0)
+    const focusable = (): HTMLElement[] => focusableWithin(dialog)
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Tab' || !active || !isTop()) return
+      // The review layer is a documented sibling surface: its composer must keep
+      // focus while this dialog is open, but Tab cycles within that surface
+      // rather than escaping to the page behind the modal.
+      const current = document.activeElement
+      const review = current instanceof Element ? current.closest<HTMLElement>('[data-dsx-review]') : null
+      if (review !== null) {
+        const reviewItems = focusableWithin(review)
+        if (reviewItems.length === 0) {
+          event.preventDefault()
+          return
+        }
+        event.preventDefault()
+        const index = reviewItems.indexOf(current as HTMLElement)
+        const next = event.shiftKey
+          ? reviewItems[index <= 0 ? reviewItems.length - 1 : index - 1]
+          : reviewItems[index < 0 || index === reviewItems.length - 1 ? 0 : index + 1]
+        next?.focus()
+        return
+      }
       const items = focusable()
       if (items.length === 0) {
         event.preventDefault()
@@ -65,7 +87,6 @@ function OverlayShell({
       }
       const first = items[0] as HTMLElement
       const last = items.at(-1) as HTMLElement
-      const current = document.activeElement
       if (event.shiftKey && (current === first || current === null || !dialog.contains(current))) {
         event.preventDefault()
         last.focus()
@@ -76,7 +97,11 @@ function OverlayShell({
     }
     const onFocusIn = (event: FocusEvent): void => {
       if (!active || !isTop()) return
-      if (event.target instanceof Node && !dialog.contains(event.target)) closeRef.current?.focus()
+      if (!(event.target instanceof Node) || dialog.contains(event.target)) return
+      // The review composer lives outside the dialog by design; it must keep
+      // focus so an owner can comment on a component inside an open drawer.
+      if (event.target instanceof Element && event.target.closest('[data-dsx-review]') !== null) return
+      closeRef.current?.focus()
     }
     document.addEventListener('keydown', onKeyDown, true)
     document.addEventListener('focusin', onFocusIn, true)

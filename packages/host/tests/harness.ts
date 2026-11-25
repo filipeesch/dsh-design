@@ -27,6 +27,7 @@ export async function createHarness(
     assetsDir?: string
     folderName?: string
     effectiveCwd?: (session: any) => string | undefined
+    sessionController?: any
     assetsDir?: string
     chromiumPath?: string
     browserTimeoutMs?: number
@@ -75,6 +76,7 @@ export async function createHarness(
     get(name: string) {
       if (name === 'webServer') return webServer
       if (name === 'sessions') return { get: (id: string) => sessions.get(id) }
+      if (name === 'sessionController') return options.sessionController
       if (name === 'workingDirectory')
         return options.effectiveCwd === undefined
           ? undefined
@@ -101,7 +103,7 @@ export async function createHarness(
   })
   const service = ctx.design as DesignService
   applyTools(ctx)
-  const route = createRouteHandler(service.registry, options.assetsDir)
+  const route = createRouteHandler(service.registry, options.assetsDir, service.comments)
   let next = 0
   return {
     root,

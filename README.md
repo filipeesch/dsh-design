@@ -4,9 +4,10 @@ The design plugin for DeepSeek Harness (DSH). It lets an agent sketch a
 clickable, responsive web app in a restricted JSX-style DSL, preview it live in
 the browser, and iterate with validation feedback attached to every edit.
 
-This repository implements the `add-design-foundation` and
-`add-design-journeys-and-checks` OpenSpec changes. The plugin is developed here,
-outside the DSH source tree, and installed into a DSH profile with `dsh plugin`.
+This repository implements the `add-design-foundation`,
+`add-design-journeys-and-checks`, and `add-design-panel-and-comments` OpenSpec
+changes. The plugin is developed here, outside the DSH source tree, and
+installed into a DSH profile with `dsh plugin`.
 
 ## Requirements
 
@@ -54,7 +55,8 @@ then lists the **Design** agent preset, and the preview route answers under
 
 A session whose working directory contains `design/design.json` gets a live
 preview. The agent shares the URL from `design_status`; open it in a normal
-browser tab while signed in to DSH.
+browser tab while signed in to DSH, or use the native **Design** action in the
+session header to place the same preview beside the conversation.
 
 ## Update
 
@@ -85,7 +87,7 @@ starts normally. Design folders in target repositories stay as plain files.
 | `kit`      | Component metadata and React components                                               |
 | `renderer` | Standalone preview app (chrome, interpreter, live reload, state)                      |
 | `host`     | DSH host plugin: registry, watcher, routes, tools, auto-validation                    |
-| `client`   | DSH client plugin (activation marker; no dead UI action)                              |
+| `client`   | DSH client plugin: native session Design tab, header action, preview frame            |
 | `preset`   | `design` agent preset and prompt section                                              |
 | `bundle`   | Installable DSH bundle composing the above                                            |
 
@@ -134,6 +136,46 @@ Journeys live in `design/journeys/*.dsx` and use stable design ids:
 See [`examples/synthetic-checkout`](examples/synthetic-checkout) for a runnable,
 entirely fictitious project covering states, fixtures, tables, lists, selects,
 and two journeys.
+
+## Design panel and review comments
+
+The plugin contributes a native, session-scoped **Design** tab to the DSH right
+sidebar and a **Design** action in the session header. The tab frames the same
+owner-authenticated interactive preview on the same origin, offers **Open in
+tab**, and offers **Back to chat** for narrow layouts. The frame is limited to
+the owning origin; deterministic documents stay unembeddable and carry no review
+controls.
+
+In the interactive preview, **Comment** turns component selection on. A click or
+the keyboard picker (arrow keys move, Enter selects, Escape exits) targets a
+rendered component without activating it. A draft captures the screen,
+breakpoint, component type, stable design id or a visibly unstable structural
+address, the named state, open overlays, tab selections, and the design
+revision. Structural anchors also carry a content fingerprint of the rendered
+screen, so an unchanged preview after an idle runtime reset keeps its pin while
+a same-address edit does not; the numeric revision is diagnostic only. Free-form
+field values, secrets, and arbitrary DOM content are not captured. Drafts live in DSH host memory keyed by session, not in the design
+repository: they survive a browser reload and separate tabs of the same session,
+but not a DSH process restart. Removing the DSH session (or disposing the
+plugin) clears its drafts; a browser reload does not. Two sessions over one project have separate
+pending sets.
+
+Keyboard selection moves through the visible components, selects a
+non-focusable structural node, exits with Escape without closing an open
+drawer, and restores focus. One session holds at most 50 pending comments; the
+batch limit is the same, so every accepted draft can be sent together, and the
+Comment control explains when the limit is reached.
+
+**Send** submits the exact reviewed draft revisions as one ordinary queued user
+message. Rejected delivery keeps the drafts and its retry; a replay of an already
+accepted batch returns its acknowledgement without enqueuing another message.
+Drafts added or edited while a batch is in flight stay pending. The success
+message counts the versions the session accepted, separately from the drafts
+it cleared and any that remain.
+
+See [`docs/review/panel-review.md`](docs/review/panel-review.md) for the
+disposable desktop and 390 CSS pixel review and
+[`docs/verification.md`](docs/verification.md) for recorded evidence.
 
 ## Headless checks
 
