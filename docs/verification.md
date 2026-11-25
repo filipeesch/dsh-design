@@ -75,6 +75,59 @@ Results:
   inactive nested defaults keep prior valid content with diagnostics and repair
   cleanly.
 
+## Component-anchored comment composer (anchor-design-comment-composer)
+
+Checks run on the packed bundle for this change, on top of the approved variants
+baseline `90978d9`. The disposable profile used a separate loopback port; the
+live GUI on 3080 and the DSH checkout were not modified. The repeatable
+procedure is in [`docs/review/composer-review.md`](review/composer-review.md).
+
+```sh
+pnpm run check
+openspec validate anchor-design-comment-composer --strict
+pnpm run pack:bundle
+```
+
+Results:
+
+- `pnpm run check` exits 0: build, compile-time type tests, ESLint, Prettier,
+  EOF newline, and Vitest. Vitest reports 22 files and 304 tests passed,
+  including the full real Chromium preview and comparison suites.
+- `openspec validate anchor-design-comment-composer --strict` reports
+  `Change 'anchor-design-comment-composer' is valid`.
+- `pnpm run pack:bundle` writes
+  `dist/filipeesch-dsh-design-bundle-0.1.0.tgz` (1,284,433 bytes; sha256
+  `97365656e2abc8cc1eda5b37410e1b5ba0bcdfc68975ea74a3faf4623b31a695`).
+- The packed artifact was installed into a fresh disposable profile and booted
+  on a non-3080 loopback port with the synthetic checkout workspace.
+  `docs/review/composer-check.mjs` reported `{"ok":true,"failures":[]}` with
+  evidence: the desktop panel opened the balloon beside the Email field with a
+  pointer touching the balloon, a 360 CSS pixel compact editor inside the pane,
+  and the 1280-pixel canvas unchanged; the pin reopened the balloon with its
+  text, Escape closed it and restored pin focus; two drafts added exactly one
+  pending entry each, one batch cleared them and recorded exactly one chat
+  message; the mobile canvas kept its 390-pixel width with a compact balloon
+  and pointer; an open drawer's Keep editing button opened a balloon with a
+  pointer inside the mobile pane with the canvas geometry unchanged; the short
+  native pane drew an arrow only when it could not cover the Email target and
+  kept the text after the pointer was dropped; and the deterministic preview
+  made no comment request and rendered no review controls.
+- Targeted regressions cover: placing the balloon right, left, above or below
+  the target with a visible pointer and no canvas reflow; flipping near a pane
+  edge and staying compact in a 360-pixel pane instead of becoming a footer;
+  never covering the target when an arrow is shown, including a 369x344 short
+  pane and a pointerless fallback that keeps edited text when no side has
+  usable room; recomputing on scroll and resize; focusing the editor only after
+  it is placed; detaching an open new or reopened editor when the screen,
+  state or variant changes, or when a reused structural address's content
+  changes, then reattaching only at the original anchor with its text intact;
+  never reattaching a stable/shared id on another screen; reopening a pin with
+  Escape and focus restoration; editing an unavailable draft from Pending
+  without a pointer; drawer selection by pointer and keyboard at desktop and
+  Mobile preview breakpoints on a desktop browser; each comparison pane
+  keeping its own anchored balloon and branch-scoped pin; and unchanged batch
+  delivery, variant context and deterministic behavior.
+
 ## Design panel and review comments (add-design-panel-and-comments)
 
 Checks run on the packed bundle for this change. The disposable profile used a

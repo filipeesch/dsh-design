@@ -369,6 +369,19 @@ beforeAll(async () => {
       )
       return
     }
+    if (url.pathname === '/__short-pane') {
+      const width = Number(url.searchParams.get('w') ?? '369')
+      const height = Number(url.searchParams.get('h') ?? '344')
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      res.end(
+        '<!doctype html><html><body style="margin:0;overflow:hidden"><iframe title="short pane" src="/design/session-test/checkout?bp=desktop" style="width:' +
+          String(width) +
+          'px;height:' +
+          String(height) +
+          'px;border:0;display:block"></iframe></body></html>',
+      )
+      return
+    }
     if (url.pathname.startsWith('/design/session-test') && !apiPath.startsWith('/_/')) {
       if (url.searchParams.get('deterministic') === '1') {
         const document = await deterministicDocument(dist, current)
@@ -722,6 +735,10 @@ describe('real browser preview regressions', async () => {
         await page.keyboard.press('Enter')
         const composer = page.locator('.dsx-review-composer')
         await composer.waitFor({ state: 'visible' })
+        await page.waitForFunction(
+          () => document.querySelector('.dsx-review-composer')?.getAttribute('data-dsx-balloon') === 'anchored',
+        )
+        expect(await page.locator('.dsx-review-pointer').count()).toBe(1)
         const context = await composer.locator('.dsx-review-context').first().textContent()
         expect(context ?? '').not.toContain('Screen · #')
         expect(context ?? '').toContain('unstable address')
@@ -753,6 +770,579 @@ describe('real browser preview regressions', async () => {
         await page.waitForFunction(() => document.querySelector('[role="dialog"]') === null)
       } finally {
         await page.context().close()
+      }
+    },
+  )
+
+  it.skipIf(chromiumPath === undefined)(
+    'anchors the comment balloon beside the drawer target and reopens it at the pin',
+    async () => {
+      current = allScreens(30)
+      const page = await pageAt({ width: 1440, height: 900 }, '/design/session-test/checkout?bp=desktop')
+      try {
+        await page.getByRole('button', { name: 'Filters' }).click()
+        await page.getByRole('dialog').waitFor({ state: 'visible' })
+        const frameBefore = await page.locator('.dsx-frame').boundingBox()
+        const innerBefore = await page
+          .locator('.dsx-frame-inner')
+          .evaluate((element) => element.getBoundingClientRect().height)
+        await page.getByRole('button', { name: 'Comment', exact: true }).click()
+        await page.getByText('Drawer body').click()
+        await page.locator('.dsx-review-composer').waitFor({ state: 'visible' })
+        await page.waitForFunction(
+          () => document.querySelector('.dsx-review-composer')?.getAttribute('data-dsx-balloon') === 'anchored',
+        )
+        await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Comment text')
+        const geometry = await page.evaluate(() => {
+          const rect = (element: Element | null) => {
+            if (element === null) return null
+            const box = element.getBoundingClientRect()
+            return {
+              left: box.left,
+              top: box.top,
+              right: box.right,
+              bottom: box.bottom,
+              width: box.width,
+              height: box.height,
+            }
+          }
+          const balloon = document.querySelector('.dsx-review-composer')
+          const candidates = [...document.querySelectorAll('[data-dsx-id], [data-dsx-address]')].filter(
+            (node) => (node.textContent ?? '').trim() === 'Drawer body',
+          )
+          return {
+            balloon: rect(balloon),
+            pointer: rect(document.querySelector('.dsx-review-pointer')),
+            target: rect(candidates.at(-1) ?? null),
+            stage: rect(document.querySelector('.dsx-stage')),
+            frame: rect(document.querySelector('.dsx-frame')),
+            side: balloon?.getAttribute('data-side') ?? null,
+            anchor: balloon?.getAttribute('data-anchor') ?? null,
+            pointers: document.querySelectorAll('.dsx-review-pointer').length,
+            dialogs: document.querySelectorAll('[role="dialog"][aria-modal="true"]').length,
+            focused: document.activeElement?.getAttribute('aria-label') ?? null,
+          }
+        })
+        expect(geometry.balloon, JSON.stringify(geometry)).not.toBeNull()
+        expect(geometry.target, JSON.stringify(geometry)).not.toBeNull()
+        expect(geometry.stage, JSON.stringify(geometry)).not.toBeNull()
+        const balloon = geometry.balloon!
+        const target = geometry.target!
+        const stage = geometry.stage!
+        expect(geometry.anchor).toBe('available')
+        expect(['right', 'left', 'bottom', 'top']).toContain(geometry.side)
+        expect(geometry.pointers).toBe(1)
+        expect(geometry.dialogs).toBe(1)
+        expect(geometry.focused).toBe('Comment text')
+        expect(balloon.left).toBeGreaterThanOrEqual(stage.left - 1)
+        expect(balloon.top).toBeGreaterThanOrEqual(stage.top - 1)
+        expect(balloon.right).toBeLessThanOrEqual(stage.right + 1)
+        expect(balloon.bottom).toBeLessThanOrEqual(stage.bottom + 1)
+        await page.screenshot({ path: '/tmp/dsx-balloon-desktop.png' })
+        const pointer = geometry.pointer!
+        expect(pointer, JSON.stringify(geometry)).not.toBeNull()
+        if (geometry.side === 'right') {
+          expect(Math.abs(pointer.right - balloon.left)).toBeLessThanOrEqual(1)
+          expect(pointer.left).toBeGreaterThanOrEqual(target.right - 2)
+        } else if (geometry.side === 'left') {
+          expect(Math.abs(pointer.left - balloon.right)).toBeLessThanOrEqual(1)
+          expect(pointer.right).toBeLessThanOrEqual(target.left + 2)
+        } else if (geometry.side === 'bottom') {
+          expect(Math.abs(pointer.bottom - balloon.top)).toBeLessThanOrEqual(1)
+          expect(pointer.top).toBeGreaterThanOrEqual(target.bottom - 2)
+        } else {
+          expect(Math.abs(pointer.top - balloon.bottom)).toBeLessThanOrEqual(1)
+          expect(pointer.bottom).toBeLessThanOrEqual(target.top + 2)
+        }
+        const horizontalGap = Math.max(balloon.left - target.right, target.left - balloon.right)
+        const verticalGap = Math.max(balloon.top - target.bottom, target.top - balloon.bottom)
+        const horizontalOverlap = Math.min(balloon.bottom, target.bottom) - Math.max(balloon.top, target.top) > 0
+        const verticalOverlap = Math.min(balloon.right, target.right) - Math.max(balloon.left, target.left) > 0
+        expect(
+          (horizontalGap >= 0 && horizontalGap <= 24 && horizontalOverlap) ||
+            (verticalGap >= 0 && verticalGap <= 24 && verticalOverlap),
+          JSON.stringify({ balloon, target }),
+        ).toBe(true)
+        const frameAfter = await page.locator('.dsx-frame').boundingBox()
+        expect(frameAfter?.width).toBe(frameBefore?.width)
+        expect(frameAfter?.height).toBe(frameBefore?.height)
+        expect(
+          await page.locator('.dsx-frame-inner').evaluate((element) => element.getBoundingClientRect().height),
+        ).toBe(innerBefore)
+
+        await page.keyboard.press('Escape')
+        await page.waitForFunction(() => document.querySelector('.dsx-review-composer') === null)
+        expect(await page.getByRole('dialog').count()).toBe(1)
+
+        await page.getByRole('button', { name: 'Comment', exact: true }).click()
+        await page.getByText('Drawer body').click()
+        await page.getByRole('textbox', { name: 'Comment text' }).fill('Anchor this drawer text')
+        await page.getByRole('button', { name: 'Save comment' }).click()
+        await page.waitForFunction(() => document.querySelectorAll('.dsx-pin').length === 1)
+        await page.locator('.dsx-pin').click()
+        await page.locator('.dsx-review-composer').waitFor({ state: 'visible' })
+        await page.waitForFunction(
+          () => document.querySelector('.dsx-review-composer')?.getAttribute('data-dsx-balloon') === 'anchored',
+        )
+        expect(await page.getByRole('textbox', { name: 'Comment text' }).inputValue()).toBe('Anchor this drawer text')
+        expect(await page.locator('[role="dialog"][aria-modal="true"]').count()).toBe(1)
+        await page.keyboard.press('Escape')
+        await page.waitForFunction(() => document.querySelector('.dsx-review-composer') === null)
+        await page.waitForFunction(() => document.activeElement?.classList.contains('dsx-pin') === true)
+        expect(await page.getByRole('dialog').count()).toBe(1)
+      } finally {
+        await page.context().close()
+      }
+    },
+  )
+
+  it.skipIf(chromiumPath === undefined)(
+    'keeps the anchored balloon compact inside a mobile canvas and a narrow pane',
+    async () => {
+      current = allScreens(31)
+      const desktop = await pageAt({ width: 1440, height: 900 }, '/design/session-test/checkout?bp=mobile')
+      try {
+        expect(await desktop.locator('.dsx-frame').evaluate((element) => element.getBoundingClientRect().width)).toBe(
+          390,
+        )
+        await desktop.getByRole('button', { name: 'Filters' }).click()
+        await desktop.getByRole('button', { name: 'Comment', exact: true }).focus()
+        await desktop.keyboard.press('Enter')
+        await desktop.waitForFunction(() => document.querySelector('[data-dsx-review-target]') !== null)
+        let highlighted = ''
+        for (let index = 0; index < 30; index += 1) {
+          highlighted = await desktop.evaluate(
+            () => document.querySelector('[data-dsx-review-target]')?.textContent?.trim() ?? '',
+          )
+          if (highlighted === 'Drawer body') break
+          await desktop.keyboard.press('ArrowDown')
+        }
+        expect(highlighted).toBe('Drawer body')
+        await desktop.keyboard.press('Enter')
+        await desktop.locator('.dsx-review-composer').waitFor({ state: 'visible' })
+        await desktop.waitForFunction(
+          () => document.querySelector('.dsx-review-composer')?.getAttribute('data-dsx-balloon') === 'anchored',
+        )
+        const mobile = await desktop.evaluate(() => {
+          const box = (element: Element | null) => {
+            if (element === null) return null
+            const rect = element.getBoundingClientRect()
+            return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width }
+          }
+          return {
+            balloon: box(document.querySelector('.dsx-review-composer')),
+            stage: box(document.querySelector('.dsx-stage')),
+            pointers: document.querySelectorAll('.dsx-review-pointer').length,
+            overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+          }
+        })
+        expect(mobile.balloon, JSON.stringify(mobile)).not.toBeNull()
+        const mobileBalloon = mobile.balloon!
+        const mobileStage = mobile.stage!
+        expect(mobile.pointers).toBe(1)
+        expect(mobileBalloon.width).toBeLessThanOrEqual(360)
+        expect(mobileBalloon.left).toBeGreaterThanOrEqual(mobileStage.left - 1)
+        expect(mobileBalloon.right).toBeLessThanOrEqual(mobileStage.right + 1)
+        expect(mobile.overflow).toBeLessThanOrEqual(1)
+        await desktop.screenshot({ path: '/tmp/dsx-balloon-mobile-canvas.png' })
+      } finally {
+        await desktop.context().close()
+      }
+
+      const narrow = await pageAt({ width: 647, height: 900 }, '/design/session-test/checkout?bp=desktop')
+      try {
+        await narrow.getByRole('button', { name: 'Filters' }).click()
+        await narrow.getByRole('button', { name: 'Comment', exact: true }).click()
+        await narrow.getByText('Drawer body').click()
+        await narrow.locator('.dsx-review-composer').waitFor({ state: 'visible' })
+        await narrow.waitForFunction(
+          () => document.querySelector('.dsx-review-composer')?.getAttribute('data-dsx-balloon') === 'anchored',
+        )
+        const compact = await narrow.evaluate(() => {
+          const rect = (element: Element | null) => {
+            if (element === null) return null
+            const box = element.getBoundingClientRect()
+            return { left: box.left, top: box.top, right: box.right, bottom: box.bottom, width: box.width }
+          }
+          return {
+            balloon: rect(document.querySelector('.dsx-review-composer')),
+            stage: rect(document.querySelector('.dsx-stage')),
+            pointers: document.querySelectorAll('.dsx-review-pointer').length,
+            overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+          }
+        })
+        expect(compact.balloon, JSON.stringify(compact)).not.toBeNull()
+        const compactBalloon = compact.balloon!
+        const compactStage = compact.stage!
+        expect(compact.pointers).toBe(1)
+        expect(compactBalloon.width).toBeLessThanOrEqual(360)
+        expect(compactBalloon.width).toBeLessThan(compactStage.width - 8)
+        expect(compactBalloon.left).toBeGreaterThanOrEqual(compactStage.left - 1)
+        expect(compactBalloon.right).toBeLessThanOrEqual(compactStage.right + 1)
+        expect(compact.overflow).toBeLessThanOrEqual(1)
+        await narrow.screenshot({ path: '/tmp/dsx-balloon-narrow.png' })
+      } finally {
+        await narrow.context().close()
+      }
+    },
+  )
+
+  it.skipIf(chromiumPath === undefined)(
+    'keeps each comparison pane balloon inside its own pane and its own branch',
+    async () => {
+      current = payload(1, [variantDemoScreen('compact'), otherVariantScreen()])
+      const page = await comparePageAt(
+        { width: 900, height: 900 },
+        '/design/session-test/variant-demo?compare=layout:compact:spacious&bp=mobile',
+      )
+      try {
+        const left = page.frameLocator('iframe[data-dsx-pane="left"]')
+        const right = page.frameLocator('iframe[data-dsx-pane="right"]')
+        await left.getByRole('button', { name: 'Open', exact: true }).click()
+        await left.getByText('Compact drawer').waitFor({ state: 'visible' })
+        await left.getByRole('button', { name: 'Comment', exact: true }).click()
+        await left.getByText('Compact drawer').click()
+        await left.locator('.dsx-review-composer').waitFor({ state: 'visible' })
+        await left.locator('.dsx-review-pointer').waitFor({ state: 'visible' })
+        const geometry = await left.locator('body').evaluate(() => {
+          const rect = (element: Element | null) => {
+            if (element === null) return null
+            const box = element.getBoundingClientRect()
+            return { left: box.left, top: box.top, right: box.right, bottom: box.bottom, width: box.width }
+          }
+          return {
+            balloon: rect(document.querySelector('.dsx-review-composer')),
+            viewport: { width: window.innerWidth, height: window.innerHeight },
+            pointers: document.querySelectorAll('.dsx-review-pointer').length,
+          }
+        })
+        expect(geometry.balloon, JSON.stringify(geometry)).not.toBeNull()
+        const balloon = geometry.balloon!
+        expect(geometry.pointers).toBe(1)
+        expect(balloon.width).toBeLessThanOrEqual(360)
+        expect(balloon.left).toBeGreaterThanOrEqual(0)
+        expect(balloon.right).toBeLessThanOrEqual(geometry.viewport.width + 1)
+        expect(balloon.top).toBeGreaterThanOrEqual(0)
+        expect(balloon.bottom).toBeLessThanOrEqual(geometry.viewport.height + 1)
+        expect(await right.locator('.dsx-review-composer').count()).toBe(0)
+        await left.getByRole('textbox', { name: 'Comment text' }).fill('Only this branch')
+        await left.getByRole('button', { name: 'Save comment' }).click()
+        await left.locator('.dsx-pin').waitFor({ state: 'visible' })
+        expect(await left.locator('.dsx-pin').count()).toBe(1)
+        expect(await right.locator('.dsx-pin').count()).toBe(0)
+      } finally {
+        await page.context().close()
+      }
+    },
+  )
+
+  it.skipIf(chromiumPath === undefined)(
+    'edits a draft whose target is unavailable without a false pointer',
+    async () => {
+      current = allScreens(32)
+      comments = [
+        {
+          id: 'foreign-comment',
+          revision: 1,
+          text: 'From another screen',
+          anchor: { id: 'open-filters', kind: 'stable', type: 'Button', revision: 32 },
+          context: { screen: 'home', breakpoint: 'desktop', overlays: [], tabs: {} },
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ]
+      const page = await pageAt({ width: 647, height: 900 }, '/design/session-test/checkout?bp=desktop')
+      try {
+        await page.getByRole('button', { name: /Pending \(1\)/ }).click()
+        await page.getByRole('button', { name: 'Edit' }).click()
+        await page.locator('.dsx-review-composer').waitFor({ state: 'visible' })
+        await page.waitForFunction(
+          () => document.querySelector('.dsx-review-composer')?.getAttribute('data-anchor') === 'unavailable',
+        )
+        expect(await page.locator('.dsx-review-pointer').count()).toBe(0)
+        const box = await page.locator('.dsx-review-composer').boundingBox()
+        const pane = await page.locator('.dsx-stage').evaluate((element) => element.getBoundingClientRect().width)
+        expect(box?.width ?? 0).toBeLessThan(pane - 8)
+        expect(await page.getByRole('textbox', { name: 'Comment text' }).inputValue()).toBe('From another screen')
+        await page.getByRole('textbox', { name: 'Comment text' }).fill('Edited without an anchor')
+        await page.getByRole('button', { name: 'Save comment' }).click()
+        await expect.poll(() => comments[0]?.text).toBe('Edited without an anchor')
+        expect(await page.locator('.dsx-pin').count()).toBe(0)
+      } finally {
+        await page.context().close()
+      }
+    },
+  )
+
+  it.skipIf(chromiumPath === undefined)(
+    'detaches an open editor when the screen changes and restores it at the original anchor',
+    async () => {
+      const catalog = screen(
+        'catalog',
+        '<Screen id="catalog" title="Catalog"><Header title="Catalog" /><Stack gap="spacing.md"><Text>Catalog row</Text></Stack></Screen>',
+      )
+      current = payload(33, [
+        screen('home', homeSource),
+        screen('checkout', checkoutSource),
+        catalog,
+        screen('stated', statedSource, statedStates),
+        screen('reconcile', reconcileSource(['order-1', 'order-2'])),
+      ])
+      const page = await pageAt({ width: 1440, height: 900 }, '/design/session-test/checkout?bp=desktop')
+      try {
+        // Exact HOLD repro: a structural Header comment, reopened, then Catalog.
+        await page.getByRole('button', { name: 'Comment', exact: true }).click()
+        await page.locator('[data-dsx-type="Header"]').click()
+        await page.getByRole('textbox', { name: 'Comment text' }).fill('Header note')
+        await page.getByRole('button', { name: 'Save comment' }).click()
+        await page.waitForFunction(() => document.querySelectorAll('.dsx-pin').length === 1)
+        await page.locator('.dsx-pin').click()
+        await page.locator('.dsx-review-composer').waitFor({ state: 'visible' })
+        await page.getByRole('textbox', { name: 'Comment text' }).fill('Header note edited')
+        await page.getByRole('button', { name: 'catalog', exact: true }).click()
+        await page.waitForFunction(() => {
+          const composer = document.querySelector('.dsx-review-composer')
+          return (
+            composer !== null &&
+            composer.getAttribute('data-anchor') === 'unavailable' &&
+            composer.getAttribute('data-detached') === 'screen'
+          )
+        })
+        expect(await page.locator('.dsx-review-pointer').count()).toBe(0)
+        expect(await page.getByRole('textbox', { name: 'Comment text' }).inputValue()).toBe('Header note edited')
+        expect(await page.locator('.dsx-pin').count()).toBe(0)
+        await page.getByRole('button', { name: 'checkout', exact: true }).click()
+        await page.waitForFunction(
+          () => document.querySelector('.dsx-review-composer')?.getAttribute('data-anchor') === 'available',
+        )
+        expect(await page.locator('.dsx-review-pointer').count()).toBe(1)
+        expect(await page.locator('.dsx-pin').count()).toBe(1)
+
+        // Stable id shared by two screens must not reattach on the other screen.
+        await page.keyboard.press('Escape')
+        await page.waitForFunction(() => document.querySelector('.dsx-review-composer') === null)
+        await page.getByRole('button', { name: 'Comment', exact: true }).click()
+        await page.locator('[data-dsx-id="open-filters"]').click()
+        await page.getByRole('textbox', { name: 'Comment text' }).fill('Filters note')
+        await page.getByRole('button', { name: 'Save comment' }).click()
+        await page.waitForFunction(() => document.querySelectorAll('.dsx-pin').length === 2)
+        await page.getByRole('button', { name: /Edit comment 2 on Button/ }).click()
+        await page.locator('.dsx-review-composer').waitFor({ state: 'visible' })
+        await page.getByRole('textbox', { name: 'Comment text' }).fill('Filters note edited')
+        await page.getByRole('button', { name: 'reconcile', exact: true }).click()
+        await page.waitForFunction(() => {
+          const composer = document.querySelector('.dsx-review-composer')
+          return (
+            composer !== null &&
+            composer.getAttribute('data-anchor') === 'unavailable' &&
+            composer.getAttribute('data-detached') === 'screen'
+          )
+        })
+        expect(await page.locator('.dsx-review-pointer').count()).toBe(0)
+        expect(await page.locator('.dsx-pin').count()).toBe(0)
+        expect(await page.getByRole('textbox', { name: 'Comment text' }).inputValue()).toBe('Filters note edited')
+        await page.getByRole('button', { name: 'checkout', exact: true }).click()
+        await page.waitForFunction(
+          () => document.querySelector('.dsx-review-composer')?.getAttribute('data-anchor') === 'available',
+        )
+        expect(await page.locator('.dsx-review-pointer').count()).toBe(1)
+        expect(await page.locator('.dsx-pin').count()).toBe(2)
+      } finally {
+        await page.context().close()
+      }
+    },
+  )
+
+  it.skipIf(chromiumPath === undefined)(
+    'detaches a structural balloon when its address is reused and restores it with the original content',
+    async () => {
+      current = payload(34, [
+        screen('home', homeSource),
+        screen('checkout', checkoutSource),
+        screen('stated', statedSource, statedStates),
+      ])
+      const page = await pageAt({ width: 1440, height: 900 }, '/design/session-test/checkout?bp=desktop')
+      try {
+        await page.getByRole('button', { name: 'Comment', exact: true }).click()
+        await page.locator('[data-dsx-type="Header"]').click()
+        await page.getByRole('textbox', { name: 'Comment text' }).fill('Structural header note')
+        await page.getByRole('button', { name: 'Save comment' }).click()
+        await page.waitForFunction(() => document.querySelectorAll('.dsx-pin').length === 1)
+        await page.locator('.dsx-pin').click()
+        await page.locator('.dsx-review-composer').waitFor({ state: 'visible' })
+        await page.getByRole('textbox', { name: 'Comment text' }).fill('Structural header note edited')
+        current = payload(35, [
+          screen('home', homeSource),
+          screen(
+            'checkout',
+            checkoutSource.replace('<Header title="Checkout" />', '<Header title="Checkout edited" />'),
+          ),
+          screen('stated', statedSource, statedStates),
+        ])
+        publish(current)
+        await page.waitForFunction(() =>
+          document.querySelector('.dsx-frame-inner')?.textContent?.includes('Checkout edited'),
+        )
+        await page.waitForFunction(() => {
+          const composer = document.querySelector('.dsx-review-composer')
+          return (
+            composer !== null &&
+            composer.getAttribute('data-anchor') === 'unavailable' &&
+            composer.getAttribute('data-detached') === 'content'
+          )
+        })
+        expect(await page.locator('.dsx-review-pointer').count()).toBe(0)
+        expect(await page.getByRole('textbox', { name: 'Comment text' }).inputValue()).toBe(
+          'Structural header note edited',
+        )
+        expect(await page.locator('.dsx-pin').count()).toBe(0)
+        current = payload(36, [
+          screen('home', homeSource),
+          screen('checkout', checkoutSource),
+          screen('stated', statedSource, statedStates),
+        ])
+        publish(current)
+        await page.waitForFunction(
+          () => !document.querySelector('.dsx-frame-inner')?.textContent?.includes('Checkout edited'),
+        )
+        await page.waitForFunction(
+          () => document.querySelector('.dsx-review-composer')?.getAttribute('data-anchor') === 'available',
+        )
+        expect(await page.locator('.dsx-review-pointer').count()).toBe(1)
+        expect(await page.locator('.dsx-pin').count()).toBe(1)
+      } finally {
+        await page.context().close()
+      }
+    },
+  )
+
+  it.skipIf(chromiumPath === undefined)(
+    'keeps a short native pane editor clear of its target or drops the pointer',
+    async () => {
+      const shortCheckout = screen(
+        'checkout',
+        checkoutSource.replace(
+          '<Stack id="styled"',
+          '<Input id="email" label="Email" placeholder="you@example.com" type="email" /><Stack id="styled"',
+        ),
+      )
+      current = payload(37, [screen('home', homeSource), shortCheckout, screen('stated', statedSource, statedStates)])
+      const context = await browser!.newContext({ viewport: { width: 1050, height: 420 } })
+      const page = await context.newPage()
+      page.on('pageerror', (error) => console.log('short pane error: ' + String(error)))
+      page.setDefaultTimeout(10000)
+      await page.goto(base + '/__short-pane', { waitUntil: 'domcontentloaded' })
+      const frame = page.frameLocator('iframe[title="short pane"]')
+      await frame.locator('.dsx-frame').waitFor()
+      const geometryOf = (selector: string) =>
+        frame.locator('.dsx-frame').evaluate((root, targetSelector) => {
+          const document_ = root.ownerDocument
+          const box = (element: Element | null) => {
+            if (element === null) return null
+            const rect = element.getBoundingClientRect()
+            return {
+              left: rect.left,
+              top: rect.top,
+              right: rect.right,
+              bottom: rect.bottom,
+              width: rect.width,
+              height: rect.height,
+            }
+          }
+          const composer = document_.querySelector('.dsx-review-composer')
+          return {
+            balloon: box(composer),
+            target: box(document_.querySelector(targetSelector)),
+            stage: box(document_.querySelector('.dsx-stage')),
+            pointers: document_.querySelectorAll('.dsx-review-pointer').length,
+            detached: composer?.getAttribute('data-detached') ?? null,
+            anchor: composer?.getAttribute('data-anchor') ?? null,
+          }
+        }, selector)
+      const overlaps = (
+        balloon: { left: number; right: number; top: number; bottom: number },
+        target: { left: number; right: number; top: number; bottom: number },
+      ): boolean =>
+        balloon.left < target.right &&
+        balloon.right > target.left &&
+        balloon.top < target.bottom &&
+        balloon.bottom > target.top
+      try {
+        await frame.getByRole('button', { name: 'Comment', exact: true }).click()
+        await frame.locator('[data-dsx-type="Header"]').click()
+        await frame.locator('.dsx-review-composer').waitFor({ state: 'visible' })
+        const header = await geometryOf('[data-dsx-type="Header"]')
+        expect(header.pointers, JSON.stringify(header)).toBe(1)
+        expect(header.detached).toBeNull()
+        expect(header.balloon).not.toBeNull()
+        expect(header.target).not.toBeNull()
+        expect(overlaps(header.balloon!, header.target!), JSON.stringify(header)).toBe(false)
+        await frame.getByRole('textbox', { name: 'Comment text' }).fill('Kept in a short pane')
+        await page.evaluate(() => {
+          const element = document.querySelector('iframe[title="short pane"]') as HTMLIFrameElement | null
+          if (element !== null) element.style.height = '240px'
+        })
+        await page.waitForFunction(() => {
+          const element = document.querySelector('iframe[title="short pane"]') as HTMLIFrameElement | null
+          return (
+            element?.contentDocument?.querySelector('.dsx-review-composer')?.getAttribute('data-detached') === 'space'
+          )
+        })
+        const short = await geometryOf('[data-dsx-type="Header"]')
+        expect(short.pointers).toBe(0)
+        expect(short.detached).toBe('space')
+        expect(short.anchor).toBe('unavailable')
+        expect(await frame.getByRole('textbox', { name: 'Comment text' }).inputValue()).toBe('Kept in a short pane')
+        await page.evaluate(() => {
+          const element = document.querySelector('iframe[title="short pane"]') as HTMLIFrameElement | null
+          if (element !== null) element.style.height = '344px'
+        })
+        await page.waitForFunction(() => {
+          const element = document.querySelector('iframe[title="short pane"]') as HTMLIFrameElement | null
+          return (
+            element?.contentDocument?.querySelector('.dsx-review-composer')?.getAttribute('data-anchor') === 'available'
+          )
+        })
+        const restored = await geometryOf('[data-dsx-type="Header"]')
+        expect(restored.pointers).toBe(1)
+        expect(overlaps(restored.balloon!, restored.target!), JSON.stringify(restored)).toBe(false)
+        expect(await frame.getByRole('textbox', { name: 'Comment text' }).inputValue()).toBe('Kept in a short pane')
+        await page.keyboard.press('Escape')
+        await frame.locator('.dsx-review-composer').waitFor({ state: 'detached' })
+
+        await frame.getByRole('button', { name: 'Comment', exact: true }).click()
+        await frame.locator('[data-dsx-id="email"]').click()
+        await frame.locator('.dsx-review-composer').waitFor({ state: 'visible' })
+        const email = await geometryOf('[data-dsx-id="email"]')
+        if (email.pointers === 0) {
+          expect(email.detached).toBe('space')
+          expect(email.anchor).toBe('unavailable')
+        } else {
+          expect(email.detached).toBeNull()
+          expect(email.anchor).toBe('available')
+          expect(email.balloon).not.toBeNull()
+          expect(email.target).not.toBeNull()
+          expect(overlaps(email.balloon!, email.target!), JSON.stringify(email)).toBe(false)
+        }
+        await frame.getByRole('textbox', { name: 'Comment text' }).fill('Email kept in a short pane')
+        await page.evaluate(() => {
+          const element = document.querySelector('iframe[title="short pane"]') as HTMLIFrameElement | null
+          if (element !== null) element.style.height = '240px'
+        })
+        await page.waitForFunction(() => {
+          const element = document.querySelector('iframe[title="short pane"]') as HTMLIFrameElement | null
+          return (
+            element?.contentDocument?.querySelector('.dsx-review-composer')?.getAttribute('data-detached') === 'space'
+          )
+        })
+        const emailShort = await geometryOf('[data-dsx-id="email"]')
+        expect(emailShort.pointers).toBe(0)
+        expect(emailShort.detached).toBe('space')
+        expect(await frame.getByRole('textbox', { name: 'Comment text' }).inputValue()).toBe(
+          'Email kept in a short pane',
+        )
+      } finally {
+        await context.close()
       }
     },
   )

@@ -6,7 +6,16 @@
  * comment endpoint returns, refreshes on load and focus, and clears only the
  * versions the host acknowledged. It is never mounted in deterministic mode.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from 'react'
 import { createPortal } from 'react-dom'
 import { COMMENT_DRAFT_MAX } from '@filipeesch/dsh-design-core'
 import type { CommentAnchor, CommentContext, CommentDraft, CommentSnapshot } from '@filipeesch/dsh-design-core'
@@ -50,12 +59,24 @@ type Composer =
       readonly anchor: CommentAnchor
       readonly context: CommentContext
     }
-  | { readonly kind: 'edit'; readonly text: string; readonly id: string; readonly revision: number }
+  | {
+      readonly kind: 'edit'
+      readonly text: string
+      readonly id: string
+      readonly revision: number
+      /** Immutable draft context; the same matching rules as a saved pin apply. */
+      readonly context: CommentContext
+      /** Anchor resolved when the editor opened; absent when the draft has no usable target. */
+      readonly anchor?: CommentAnchor
+    }
+
+/** Why a draft or open editor is detached from the current view. */
+export type AnchorContextReason = 'screen' | 'state' | 'variant' | 'content'
 
 /** How one stored draft relates to the currently rendered screen. */
 export type DraftViewStatus =
   | { readonly kind: 'anchored'; readonly element: HTMLElement }
-  | { readonly kind: 'context'; readonly reason: 'screen' | 'state' | 'variant' | 'content' }
+  | { readonly kind: 'context'; readonly reason: AnchorContextReason }
   | { readonly kind: 'unresolved' }
 
 type Status = { readonly kind: 'success' | 'error' | 'info'; readonly message: string }
@@ -65,6 +86,169 @@ interface PinPosition {
   readonly index: number
   readonly left: number
   readonly top: number
+}
+
+/** One placement for the component-anchored comment balloon. */
+export interface BalloonPlacement {
+  readonly side: 'right' | 'left' | 'bottom' | 'top'
+  readonly left: number
+  readonly top: number
+  readonly width: number
+  readonly maxHeight: number
+  /** Offset of the pointer centre from the balloon's leading edge. */
+  readonly pointer: number
+}
+
+/** Minimal rectangle geometry shared by every placement input. */
+export interface BalloonRect {
+  readonly left: number
+  readonly top: number
+  readonly right: number
+  readonly bottom: number
+  readonly width: number
+  readonly height: number
+}
+
+const BALLOON_GAP = 12
+const BALLOON_MARGIN = 8
+const BALLOON_MAX_WIDTH = 360
+const BALLOON_MIN_WIDTH = 180
+/** jsdom has no layout; a sane height still yields a deterministic test placement. */
+const BALLOON_FALLBACK_HEIGHT = 220
+const BALLOON_MIN_HEIGHT = 120
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.min(Math.max(value, minimum), Math.max(minimum, maximum))
+}
+
+/** Intersect one rectangle with another, collapsing to zero area when disjoint. */
+export function intersectBalloonRect(rect: BalloonRect, bounds: BalloonRect): BalloonRect {
+  const left = Math.max(rect.left, bounds.left)
+  const top = Math.max(rect.top, bounds.top)
+  const right = Math.min(rect.right, bounds.right)
+  const bottom = Math.min(rect.bottom, bounds.bottom)
+  return {
+    left,
+    top,
+    right,
+    bottom,
+    width: Math.max(right - left, 0),
+    height: Math.max(bottom - top, 0),
+  }
+}
+
+/** Whether any part of the target is inside the visible pane. */
+export function isBalloonTargetVisible(target: BalloonRect, bounds: BalloonRect): boolean {
+  const visible = intersectBalloonRect(target, bounds)
+  return visible.width > 0 && visible.height > 0
+}
+
+/**
+ * Place the balloon beside the visible target without ever covering it.
+ *
+ * Each candidate side must have enough usable room in the pane for a minimum
+ * editor: horizontal sides shrink the width, vertical sides shrink the height
+ * and let the balloon scroll internally. Sides are tried right, left, below,
+ * above. When none is usable, this returns undefined so the caller can show an
+ * explicitly pointerless editor instead of a false or overlapping pointer.
+ */
+export function placeCommentBalloon(
+  target: BalloonRect,
+  bounds: BalloonRect,
+  measured: { readonly width: number; readonly height: number },
+): BalloonPlacement | undefined {
+  const margin = BALLOON_MARGIN
+  const gap = BALLOON_GAP
+  const maxWidth = Math.min(BALLOON_MAX_WIDTH, bounds.width - margin * 2)
+  const maxHeight = bounds.height - margin * 2
+  const visible = intersectBalloonRect(target, bounds)
+  if (maxWidth < BALLOON_MIN_WIDTH || maxHeight < BALLOON_MIN_HEIGHT) return undefined
+  if (visible.width <= 0 || visible.height <= 0) return undefined
+  const rawHeight = Math.min(Math.max(measured.height > 1 ? measured.height : BALLOON_FALLBACK_HEIGHT, 1), maxHeight)
+  const leftLimit = bounds.left + margin
+  const topLimit = bounds.top + margin
+  const rightLimit = Math.max(bounds.right - margin, leftLimit)
+  const bottomLimit = Math.max(bounds.bottom - margin, topLimit)
+  const centreX = visible.left + visible.width / 2
+  const centreY = visible.top + visible.height / 2
+  const pointerFor = (
+    side: BalloonPlacement['side'],
+    left: number,
+    top: number,
+    width: number,
+    height: number,
+  ): number =>
+    side === 'right' || side === 'left'
+      ? clamp(centreY - top, 14, Math.max(14, height - 14))
+      : clamp(centreX - left, 14, Math.max(14, width - 14))
+
+  const rightSpace = rightLimit - visible.right - gap
+  if (rightSpace >= BALLOON_MIN_WIDTH) {
+    const width = Math.min(maxWidth, rightSpace)
+    const height = Math.min(rawHeight, maxHeight)
+    const left = visible.right + gap
+    const top = clamp(centreY - height / 2, topLimit, bottomLimit - height)
+    if (left + width <= rightLimit && top >= topLimit && top + height <= bottomLimit) {
+      return { side: 'right', left, top, width, maxHeight, pointer: pointerFor('right', left, top, width, height) }
+    }
+  }
+  const leftSpace = visible.left - leftLimit - gap
+  if (leftSpace >= BALLOON_MIN_WIDTH) {
+    const width = Math.min(maxWidth, leftSpace)
+    const height = Math.min(rawHeight, maxHeight)
+    const left = visible.left - gap - width
+    const top = clamp(centreY - height / 2, topLimit, bottomLimit - height)
+    if (left >= leftLimit && top >= topLimit && top + height <= bottomLimit) {
+      return { side: 'left', left, top, width, maxHeight, pointer: pointerFor('left', left, top, width, height) }
+    }
+  }
+  const bottomSpace = bottomLimit - visible.bottom - gap
+  if (bottomSpace >= BALLOON_MIN_HEIGHT) {
+    const height = Math.min(rawHeight, bottomSpace)
+    const width = maxWidth
+    const left = clamp(centreX - width / 2, leftLimit, rightLimit - width)
+    const top = visible.bottom + gap
+    if (top + height <= bottomLimit) {
+      return {
+        side: 'bottom',
+        left,
+        top,
+        width,
+        maxHeight: height,
+        pointer: pointerFor('bottom', left, top, width, height),
+      }
+    }
+  }
+  const topSpace = visible.top - topLimit - gap
+  if (topSpace >= BALLOON_MIN_HEIGHT) {
+    const height = Math.min(rawHeight, topSpace)
+    const width = maxWidth
+    const left = clamp(centreX - width / 2, leftLimit, rightLimit - width)
+    const top = visible.top - gap - height
+    if (top >= topLimit) {
+      return {
+        side: 'top',
+        left,
+        top,
+        width,
+        maxHeight: height,
+        pointer: pointerFor('top', left, top, width, height),
+      }
+    }
+  }
+  return undefined
+}
+
+function sameBalloon(left: BalloonPlacement | undefined, right: BalloonPlacement): boolean {
+  return (
+    left !== undefined &&
+    left.side === right.side &&
+    left.left === right.left &&
+    left.top === right.top &&
+    left.width === right.width &&
+    left.maxHeight === right.maxHeight &&
+    left.pointer === right.pointer
+  )
 }
 
 const NODE_SELECTOR = '[data-dsx-id], [data-dsx-address]'
@@ -131,6 +315,26 @@ function isRendered(node: HTMLElement): boolean {
 }
 
 /**
+ * Shared anchor-context rule for saved pins and the open composer balloon.
+ *
+ * A draft from another screen, state or variant is never attached, and a
+ * structural address is only trusted while its rendered-content fingerprint
+ * still matches. Stable ids may survive revisions.
+ */
+export function anchorContextMismatch(
+  context: CommentContext,
+  anchor: CommentAnchor,
+  view: { readonly screen: string; readonly state?: string; readonly variant?: string; readonly fingerprint?: string },
+): AnchorContextReason | undefined {
+  if (context.screen !== view.screen) return 'screen'
+  if ((context.state ?? undefined) !== (view.state ?? undefined)) return 'state'
+  if ((context.variant ?? undefined) !== (view.variant ?? undefined)) return 'variant'
+  if (anchor.kind === 'structural' && (anchor.fingerprint === undefined || anchor.fingerprint !== view.fingerprint))
+    return 'content'
+  return undefined
+}
+
+/**
  * Resolve a stored draft against the current screen, named state, and revision.
  *
  * A draft from another screen or state is not attached. A structural address is
@@ -142,15 +346,8 @@ export function resolveDraftStatus(
   root: ParentNode | null,
   view: { readonly screen: string; readonly state?: string; readonly variant?: string; readonly fingerprint?: string },
 ): DraftViewStatus {
-  if (draft.context.screen !== view.screen) return { kind: 'context', reason: 'screen' }
-  if ((draft.context.state ?? undefined) !== (view.state ?? undefined)) return { kind: 'context', reason: 'state' }
-  if ((draft.context.variant ?? undefined) !== (view.variant ?? undefined))
-    return { kind: 'context', reason: 'variant' }
-  if (
-    draft.anchor.kind === 'structural' &&
-    (draft.anchor.fingerprint === undefined || draft.anchor.fingerprint !== view.fingerprint)
-  )
-    return { kind: 'context', reason: 'content' }
+  const mismatch = anchorContextMismatch(draft.context, draft.anchor, view)
+  if (mismatch !== undefined) return { kind: 'context', reason: mismatch }
   if (root === null) return { kind: 'unresolved' }
   const node = findAnchorElement(root, draft.anchor)
   if (node === undefined || !isRendered(node)) return { kind: 'unresolved' }
@@ -208,7 +405,12 @@ export function ReviewOverlay(props: ReviewOverlayProps): ReactNode {
   const [busy, setBusy] = useState(false)
   const [picker, setPicker] = useState(0)
   const [positions, setPositions] = useState<PinPosition[]>([])
+  const [balloon, setBalloon] = useState<BalloonPlacement | undefined>(undefined)
+  const [balloonDetached, setBalloonDetached] = useState<AnchorContextReason | 'missing' | 'space' | undefined>(
+    undefined,
+  )
   const composerRef = useRef<HTMLTextAreaElement>(null)
+  const balloonRef = useRef<HTMLDivElement>(null)
   const previousFocus = useRef<HTMLElement | undefined>(undefined)
   const pendingBatch = useRef<{ requestId: string; signature: string } | undefined>(undefined)
   const context = useMemo(() => contextOf(props), [props])
@@ -218,6 +420,8 @@ export function ReviewOverlay(props: ReviewOverlayProps): ReactNode {
   revisionRef.current = revision
   const fingerprintRef = useRef(fingerprint)
   fingerprintRef.current = fingerprint
+  const viewRef = useRef({ screen, state, variant, fingerprint })
+  viewRef.current = { screen, state, variant, fingerprint }
   const drafts = useMemo<readonly CommentDraft[]>(() => snapshot?.drafts ?? [], [snapshot])
   const count = drafts.length
   const atLimit = count >= COMMENT_DRAFT_MAX
@@ -229,6 +433,146 @@ export function ReviewOverlay(props: ReviewOverlayProps): ReactNode {
     }
     return map
   }, [drafts, frame, screen, state, variant, fingerprint, breakpoint])
+
+  const frameRef = useRef(frame)
+  frameRef.current = frame
+  const composerStateRef = useRef(composer)
+  composerStateRef.current = composer
+  const balloonRaf = useRef<number | undefined>(undefined)
+  const balloonTarget = useRef<HTMLElement | undefined>(undefined)
+  const balloonTargetObserver = useRef<ResizeObserver | undefined>(undefined)
+  const balloonUpdate = useRef<() => void>(() => undefined)
+
+  const scheduleBalloon = useCallback((): void => {
+    if (balloonRaf.current !== undefined) return
+    const raf = globalThis.requestAnimationFrame
+    if (typeof raf !== 'function') {
+      balloonUpdate.current()
+      return
+    }
+    balloonRaf.current = raf(() => {
+      balloonRaf.current = undefined
+      balloonUpdate.current()
+    })
+  }, [])
+
+  const updateBalloon = useCallback((): void => {
+    const currentComposer = composerStateRef.current
+    const currentFrame = frameRef.current
+    if (currentComposer === undefined || currentFrame === null) {
+      setBalloon(undefined)
+      setBalloonDetached(undefined)
+      return
+    }
+    if (currentComposer.anchor === undefined) {
+      setBalloon(undefined)
+      setBalloonDetached(undefined)
+      return
+    }
+    // The editor keeps the same immutable context as a saved draft, so a
+    // navigation, state/variant change or content edit detaches the balloon
+    // instead of finding an unrelated component with the same id or address.
+    const mismatch = anchorContextMismatch(currentComposer.context, currentComposer.anchor, viewRef.current)
+    if (mismatch !== undefined) {
+      setBalloon(undefined)
+      setBalloonDetached(mismatch)
+      return
+    }
+    const inner = currentFrame.querySelector<HTMLElement>('.dsx-frame-inner') ?? currentFrame
+    const element = findAnchorElement(inner, currentComposer.anchor)
+    const stage = currentFrame.closest<HTMLElement>('.dsx-stage')
+    const pane = (stage ?? currentFrame).getBoundingClientRect()
+    const width = globalThis.innerWidth || document.documentElement.clientWidth || pane.right
+    const height = globalThis.innerHeight || document.documentElement.clientHeight || pane.bottom
+    const bounds = intersectBalloonRect(pane, { left: 0, top: 0, right: width, bottom: height, width, height })
+    const target = element === undefined || !isRendered(element) ? undefined : element.getBoundingClientRect()
+    if (target === undefined || bounds.width <= 0 || bounds.height <= 0 || !isBalloonTargetVisible(target, bounds)) {
+      setBalloon(undefined)
+      setBalloonDetached('missing')
+      return
+    }
+    const measured = balloonRef.current === null ? undefined : balloonRef.current.getBoundingClientRect()
+    // The visible box may already be capped by a previous short-pane placement;
+    // the scrollable body keeps the natural content height so the balloon can
+    // grow back when the pane does.
+    const body = balloonRef.current?.querySelector<HTMLElement>('.dsx-review-balloon-body')
+    const contentHeight = Math.max(measured?.height ?? 0, body?.scrollHeight ?? 0)
+    const placement = placeCommentBalloon(target, bounds, {
+      width: measured?.width ?? BALLOON_MAX_WIDTH,
+      height: contentHeight > 0 ? contentHeight : BALLOON_FALLBACK_HEIGHT,
+    })
+    if (placement === undefined) {
+      // No side has enough room for a non-overlapping editor: keep the text
+      // editable in the pointerless fallback instead of drawing a false arrow.
+      setBalloon(undefined)
+      setBalloonDetached('space')
+      return
+    }
+    setBalloon((current) => (sameBalloon(current, placement) ? current : placement))
+    setBalloonDetached(undefined)
+    if (balloonTarget.current !== element) {
+      balloonTargetObserver.current?.disconnect()
+      if (element !== undefined && typeof ResizeObserver !== 'undefined') {
+        balloonTargetObserver.current ??= new ResizeObserver(() => scheduleBalloon())
+        balloonTargetObserver.current.observe(element)
+      }
+      balloonTarget.current = element
+    }
+  }, [scheduleBalloon])
+  balloonUpdate.current = updateBalloon
+
+  useLayoutEffect(() => {
+    updateBalloon()
+    // Recompute when the editor opens, its anchor or immutable context changes,
+    // or the preview moves to another screen/state/variant, not on every
+    // keystroke; observers cover layout and target changes while it is open.
+  }, [
+    composer === undefined,
+    composer?.kind,
+    composer?.anchor,
+    composer?.context,
+    frame,
+    screen,
+    state,
+    variant,
+    fingerprint,
+    updateBalloon,
+  ])
+
+  useEffect(() => {
+    if (composer === undefined || frame === null) return
+    const inner = frame.querySelector<HTMLElement>('.dsx-frame-inner')
+    const stage = frame.closest<HTMLElement>('.dsx-stage')
+    const resize = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(() => scheduleBalloon())
+    resize?.observe(frame)
+    if (inner !== null) resize?.observe(inner)
+    if (stage !== null) resize?.observe(stage)
+    if (balloonRef.current !== null) resize?.observe(balloonRef.current)
+    const mutations =
+      typeof MutationObserver === 'undefined' ? undefined : new MutationObserver(() => scheduleBalloon())
+    mutations?.observe(inner ?? frame, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['data-dsx-id', 'data-dsx-address', 'class', 'style'],
+    })
+    window.addEventListener('resize', scheduleBalloon)
+    document.addEventListener('scroll', scheduleBalloon, true)
+    scheduleBalloon()
+    return () => {
+      resize?.disconnect()
+      mutations?.disconnect()
+      balloonTargetObserver.current?.disconnect()
+      balloonTargetObserver.current = undefined
+      balloonTarget.current = undefined
+      window.removeEventListener('resize', scheduleBalloon)
+      document.removeEventListener('scroll', scheduleBalloon, true)
+      if (balloonRaf.current !== undefined) {
+        globalThis.cancelAnimationFrame?.(balloonRaf.current)
+        balloonRaf.current = undefined
+      }
+    }
+  }, [composer === undefined, frame, scheduleBalloon])
 
   const refresh = useCallback(
     async (signal?: AbortSignal): Promise<void> => {
@@ -339,24 +683,50 @@ export function ReviewOverlay(props: ReviewOverlayProps): ReactNode {
     [drafts.length],
   )
 
-  const beginEdit = useCallback((draft: CommentDraft) => {
-    previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : undefined
-    setMode(false)
-    setPanelOpen(true)
-    setComposer({ kind: 'edit', text: draft.text, id: draft.id, revision: draft.revision })
-    setStatus(undefined)
-  }, [])
+  const beginEdit = useCallback(
+    (draft: CommentDraft) => {
+      previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : undefined
+      setMode(false)
+      setPanelOpen(true)
+      const resolved = statuses.get(draft.id)
+      const element = resolved?.kind === 'anchored' ? resolved.element : undefined
+      // A pin for a target outside the visible pane still reopens at that
+      // component: bring it into view before placing the balloon. A stale or
+      // foreign draft keeps its text and opens without a pointer instead.
+      if (element !== undefined && typeof element.scrollIntoView === 'function') {
+        element.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+      }
+      setComposer({
+        kind: 'edit',
+        text: draft.text,
+        id: draft.id,
+        revision: draft.revision,
+        context: { ...draft.context, overlays: [...draft.context.overlays], tabs: { ...draft.context.tabs } },
+        ...(element === undefined ? {} : { anchor: draft.anchor }),
+      })
+      setStatus(undefined)
+    },
+    [statuses],
+  )
 
   const composerWasOpen = useRef(false)
+  const focusedComposer = useRef<string | undefined>(undefined)
   useEffect(() => {
     if (composer !== undefined) {
       composerWasOpen.current = true
+      const key = composer.kind + ':' + (composer.kind === 'edit' ? composer.id : composer.anchor.id)
+      // An anchored balloon is briefly hidden while it is measured; focus it
+      // once it is visible instead of losing focus to the drawer behind it.
+      if (focusedComposer.current === key) return
+      if (composer.anchor !== undefined && balloon === undefined && balloonDetached === undefined) return
+      focusedComposer.current = key
       composerRef.current?.focus()
     } else if (composerWasOpen.current) {
       composerWasOpen.current = false
+      focusedComposer.current = undefined
       restoreFocus()
     }
-  }, [composer, restoreFocus])
+  }, [composer, balloon, balloonDetached, restoreFocus])
 
   useEffect(() => {
     if (!mode || composer !== undefined) return
@@ -728,53 +1098,107 @@ export function ReviewOverlay(props: ReviewOverlayProps): ReactNode {
             </aside>
           ) : null}
           {composer !== undefined ? (
-            <div className="dsx-review-composer" role="dialog" aria-label="Comment composer" aria-modal="false">
-              <header>
-                <strong>{composer.kind === 'new' ? 'New comment' : 'Edit comment'}</strong>
-                <button type="button" aria-label="Close comment composer" onClick={closeComposer}>
-                  ×
-                </button>
-              </header>
-              {composer.kind === 'new' ? (
-                <div className="dsx-review-context">
-                  {composer.anchor.type} · {composer.anchor.id}
-                  {composer.anchor.kind === 'structural' ? ' (unstable address)' : ''}
-                </div>
-              ) : null}
-              <textarea
-                ref={composerRef}
-                aria-label="Comment text"
-                value={composer.text}
-                onChange={(event) =>
-                  setComposer((current) => (current === undefined ? current : { ...current, text: event.target.value }))
-                }
-                onKeyDown={(event) => {
-                  if (event.key === 'Escape') {
-                    event.preventDefault()
-                    event.stopPropagation()
-                    closeComposer()
-                  } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                    event.preventDefault()
-                    void save()
+            <div
+              ref={balloonRef}
+              className={'dsx-review-composer' + (balloon === undefined ? ' is-unanchored' : ' is-anchored')}
+              role="dialog"
+              aria-label="Comment composer"
+              aria-modal="false"
+              data-dsx-balloon={balloon === undefined ? 'unanchored' : 'anchored'}
+              data-anchor={balloon === undefined ? 'unavailable' : 'available'}
+              data-detached={balloonDetached}
+              data-side={balloon?.side}
+              style={
+                balloon !== undefined
+                  ? ({
+                      left: balloon.left,
+                      top: balloon.top,
+                      width: balloon.width,
+                      maxHeight: balloon.maxHeight,
+                      '--dsx-pointer': String(balloon.pointer) + 'px',
+                    } as CSSProperties)
+                  : composer.anchor !== undefined && balloonDetached === undefined
+                    ? { visibility: 'hidden' }
+                    : undefined
+              }
+            >
+              {balloon !== undefined ? <span className="dsx-review-pointer" aria-hidden="true" /> : null}
+              <div className="dsx-review-balloon-body">
+                <header>
+                  <strong>{composer.kind === 'new' ? 'New comment' : 'Edit comment'}</strong>
+                  <button type="button" aria-label="Close comment composer" onClick={closeComposer}>
+                    ×
+                  </button>
+                </header>
+                {composer.kind === 'new' ? (
+                  <div className="dsx-review-context">
+                    {composer.anchor.type} · {composer.anchor.id}
+                    {composer.anchor.kind === 'structural' ? ' (unstable address)' : ''}
+                  </div>
+                ) : composer.anchor === undefined ? null : (
+                  <div className="dsx-review-context">
+                    {composer.anchor.type} · {composer.anchor.id}
+                    {composer.anchor.kind === 'structural' ? ' (unstable address)' : ''}
+                  </div>
+                )}
+                {composer.anchor === undefined ? (
+                  <div className="dsx-review-context dsx-review-away">
+                    This comment belongs to another screen, state, variant, or a component that changed. It stays
+                    editable here without a pointer.
+                  </div>
+                ) : balloonDetached === 'missing' ? (
+                  <div className="dsx-review-context dsx-review-away" role="status">
+                    Target unavailable on this view. Your text is kept; the balloon returns when the component is
+                    visible again.
+                  </div>
+                ) : balloonDetached === 'space' ? (
+                  <div className="dsx-review-context dsx-review-away" role="status">
+                    Not enough room beside this component in the visible pane. Your text is kept; the balloon returns
+                    when the pane or the component has room again.
+                  </div>
+                ) : balloonDetached !== undefined ? (
+                  <div className="dsx-review-context dsx-review-away" role="status">
+                    This balloon is detached from the current screen, state, variant, or content. Your text is kept; it
+                    reattaches only when its original target is valid again.
+                  </div>
+                ) : null}
+                <textarea
+                  ref={composerRef}
+                  aria-label="Comment text"
+                  value={composer.text}
+                  onChange={(event) =>
+                    setComposer((current) =>
+                      current === undefined ? current : { ...current, text: event.target.value },
+                    )
                   }
-                }}
-                rows={3}
-                maxLength={2000}
-                placeholder="What should change here?"
-              />
-              <div className="dsx-review-context">
-                Screen {screen} · {breakpoint}
-                {composer.kind === 'new' && composer.context.variant !== undefined
-                  ? ' · variant ' + composer.context.variant
-                  : ''}
-              </div>
-              <div className="dsx-review-actions">
-                <button type="button" className="dsx-review-save" onClick={() => void save()} disabled={busy}>
-                  {busy ? 'Saving…' : 'Save comment'}
-                </button>
-                <button type="button" onClick={closeComposer}>
-                  Cancel
-                </button>
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      closeComposer()
+                    } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                      event.preventDefault()
+                      void save()
+                    }
+                  }}
+                  rows={3}
+                  maxLength={2000}
+                  placeholder="What should change here?"
+                />
+                <div className="dsx-review-context">
+                  Screen {screen} · {breakpoint}
+                  {composer.kind === 'new' && composer.context.variant !== undefined
+                    ? ' · variant ' + composer.context.variant
+                    : ''}
+                </div>
+                <div className="dsx-review-actions">
+                  <button type="button" className="dsx-review-save" onClick={() => void save()} disabled={busy}>
+                    {busy ? 'Saving…' : 'Save comment'}
+                  </button>
+                  <button type="button" onClick={closeComposer}>
+                    Cancel
+                  </button>
+                </div>
               </div>
             </div>
           ) : null}

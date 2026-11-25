@@ -676,6 +676,217 @@ describe('review layer', () => {
     expect(await screen.findByText(/50 of 50 pending/)).toBeTruthy()
   })
 
+  it('opens the composer as a balloon beside its target without moving the canvas', async () => {
+    render(React.createElement(App))
+    await ready()
+    await openComments()
+    const stage = document.querySelector('.dsx-stage') as HTMLElement
+    const frame = document.querySelector('.dsx-frame') as HTMLElement
+    const target = document.querySelector('[data-dsx-id="open"]') as HTMLElement
+    mockRect(stage, { left: 0, top: 60, width: 960, height: 680 })
+    mockRect(frame, { left: 0, top: 60, width: 960, height: 680 })
+    mockRect(target, { left: 100, top: 160, width: 100, height: 40 })
+    const frameStyle = frame.getAttribute('style')
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+    const composer = await screen.findByRole('dialog', { name: 'Comment composer' })
+    await waitFor(() => expect(composer.getAttribute('data-dsx-balloon')).toBe('anchored'))
+    const balloon = document.querySelector('.dsx-review-composer') as HTMLElement
+    expect(balloon.getAttribute('data-side')).toBe('right')
+    expect(balloon.style.left).toBe('212px')
+    expect(balloon.style.top).toBe('70px')
+    expect(balloon.style.width).toBe('360px')
+    expect(balloon.getAttribute('data-anchor')).toBe('available')
+    expect(balloon.querySelector('.dsx-review-pointer')).not.toBeNull()
+    expect(frame.getAttribute('style')).toBe(frameStyle)
+    expect(stage.scrollTop).toBe(0)
+  })
+
+  it('flips the balloon to the other side near the pane edge', async () => {
+    render(React.createElement(App))
+    await ready()
+    await openComments()
+    const stage = document.querySelector('.dsx-stage') as HTMLElement
+    const frame = document.querySelector('.dsx-frame') as HTMLElement
+    const target = document.querySelector('[data-dsx-id="open"]') as HTMLElement
+    mockRect(stage, { left: 0, top: 60, width: 960, height: 680 })
+    mockRect(frame, { left: 0, top: 60, width: 960, height: 680 })
+    mockRect(target, { left: 800, top: 160, width: 100, height: 40 })
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+    const composer = await screen.findByRole('dialog', { name: 'Comment composer' })
+    await waitFor(() => expect(composer.getAttribute('data-side')).toBe('left'))
+    expect((composer as HTMLElement).style.left).toBe('428px')
+    expect(composer.getAttribute('data-anchor')).toBe('available')
+  })
+
+  it('keeps a compact balloon inside a narrow pane instead of a footer', async () => {
+    render(React.createElement(App))
+    await ready()
+    await openComments()
+    const stage = document.querySelector('.dsx-stage') as HTMLElement
+    const frame = document.querySelector('.dsx-frame') as HTMLElement
+    const target = document.querySelector('[data-dsx-id="open"]') as HTMLElement
+    mockRect(stage, { left: 0, top: 60, width: 360, height: 680 })
+    mockRect(frame, { left: 0, top: 60, width: 1280, height: 680 })
+    mockRect(target, { left: 100, top: 160, width: 100, height: 40 })
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+    const composer = (await screen.findByRole('dialog', { name: 'Comment composer' })) as HTMLElement
+    await waitFor(() => expect(composer.getAttribute('data-dsx-balloon')).toBe('anchored'))
+    expect(composer.getAttribute('data-side')).toBe('bottom')
+    expect(composer.style.width).toBe('344px')
+    expect(composer.style.left).toBe('8px')
+    expect(composer.style.top).toBe('212px')
+    expect(Number.parseFloat(composer.style.width)).toBeLessThan(360)
+  })
+
+  it('recomputes the balloon placement on resize', async () => {
+    render(React.createElement(App))
+    await ready()
+    await openComments()
+    const stage = document.querySelector('.dsx-stage') as HTMLElement
+    const frame = document.querySelector('.dsx-frame') as HTMLElement
+    const target = document.querySelector('[data-dsx-id="open"]') as HTMLElement
+    mockRect(stage, { left: 0, top: 60, width: 960, height: 680 })
+    mockRect(frame, { left: 0, top: 60, width: 960, height: 680 })
+    mockRect(target, { left: 100, top: 160, width: 100, height: 40 })
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+    const composer = (await screen.findByRole('dialog', { name: 'Comment composer' })) as HTMLElement
+    await waitFor(() => expect(composer.style.top).toBe('70px'))
+    mockRect(target, { left: 300, top: 300, width: 100, height: 40 })
+    fireEvent(window, new Event('resize'))
+    await waitFor(() => expect(composer.style.left).toBe('412px'))
+    expect(composer.style.top).toBe('210px')
+    mockRect(target, { left: 400, top: 250, width: 100, height: 40 })
+    fireEvent.scroll(stage)
+    await waitFor(() => expect(composer.style.left).toBe('512px'))
+    expect(composer.style.top).toBe('160px')
+  })
+
+  it('reopens a saved comment at its pin with focus and Escape intact', async () => {
+    seedDraft()
+    render(React.createElement(App))
+    await ready()
+    const stage = document.querySelector('.dsx-stage') as HTMLElement
+    const frame = document.querySelector('.dsx-frame') as HTMLElement
+    const target = document.querySelector('[data-dsx-id="open"]') as HTMLElement
+    mockRect(stage, { left: 0, top: 60, width: 960, height: 680 })
+    mockRect(frame, { left: 0, top: 60, width: 960, height: 680 })
+    mockRect(target, { left: 100, top: 160, width: 100, height: 40 })
+    await waitFor(() => expect(document.querySelector('.dsx-pin')).not.toBeNull())
+    fireEvent.click(document.querySelector('.dsx-pin') as HTMLElement)
+    const composer = await screen.findByRole('dialog', { name: 'Comment composer' })
+    await waitFor(() => expect(composer.getAttribute('data-dsx-balloon')).toBe('anchored'))
+    expect(composer.getAttribute('data-side')).toBe('right')
+    expect((screen.getByRole('textbox', { name: 'Comment text' }) as HTMLTextAreaElement).value).toBe('Seed comment')
+    expect(composer.textContent).toContain('Button · open')
+    await waitFor(() => expect(document.activeElement?.getAttribute('aria-label')).toBe('Comment text'))
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Comment text' }), { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Comment composer' })).toBeNull())
+    expect(document.querySelectorAll('.dsx-pin')).toHaveLength(1)
+  })
+
+  it('keeps an unavailable draft editable without a false pointer', async () => {
+    const seeded = seedDraft({
+      text: 'Another screen note',
+      anchor: { id: 'open', kind: 'stable', type: 'Button', revision: 1 },
+      context: { screen: 'details', breakpoint: 'desktop', overlays: [], tabs: {} },
+    })
+    render(React.createElement(App))
+    await ready()
+    fireEvent.click(screen.getByRole('button', { name: /Pending \(1\)/ }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+    const composer = (await screen.findByRole('dialog', { name: 'Comment composer' })) as HTMLElement
+    expect(composer.getAttribute('data-dsx-balloon')).toBe('unanchored')
+    expect(composer.getAttribute('data-anchor')).toBe('unavailable')
+    expect(composer.querySelector('.dsx-review-pointer')).toBeNull()
+    expect(composer.textContent).toContain('without a pointer')
+    expect((screen.getByRole('textbox', { name: 'Comment text' }) as HTMLTextAreaElement).value).toBe(
+      'Another screen note',
+    )
+    fireEvent.change(screen.getByRole('textbox', { name: 'Comment text' }), { target: { value: 'Still editable' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save comment' }))
+    await waitFor(() => expect(updateCalls).toHaveLength(1))
+    expect(updateCalls[0]).toMatchObject({ id: seeded.id, revision: 1, text: 'Still editable' })
+  })
+
+  it('keeps unsaved text and reattaches when the anchor returns', async () => {
+    render(React.createElement(App))
+    await ready()
+    await openComments()
+    const stage = document.querySelector('.dsx-stage') as HTMLElement
+    const frame = document.querySelector('.dsx-frame') as HTMLElement
+    const target = document.querySelector('[data-dsx-id="open"]') as HTMLElement
+    mockRect(stage, { left: 0, top: 60, width: 960, height: 680 })
+    mockRect(frame, { left: 0, top: 60, width: 960, height: 680 })
+    mockRect(target, { left: 100, top: 160, width: 100, height: 40 })
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+    const composer = (await screen.findByRole('dialog', { name: 'Comment composer' })) as HTMLElement
+    await waitFor(() => expect(composer.getAttribute('data-anchor')).toBe('available'))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Comment text' }), { target: { value: 'Keep this text' } })
+    current = payload(2, [
+      screenOf(
+        '<Screen id="home" title="Home"><Stack gap="spacing.md"><Text>Hello preview</Text><Button id="plain">Plain</Button></Stack></Screen>',
+        'home',
+        namedStates,
+      ),
+    ])
+    MockEventSource.instances[0]!.emit('revision', { rev: 2 })
+    expect(await screen.findByText('Hello preview')).toBeTruthy()
+    await waitFor(() => expect(composer.getAttribute('data-anchor')).toBe('unavailable'))
+    expect(composer.querySelector('.dsx-review-pointer')).toBeNull()
+    expect((screen.getByRole('textbox', { name: 'Comment text' }) as HTMLTextAreaElement).value).toBe('Keep this text')
+    current = payload(3, [screenOf(home(), 'home', namedStates)])
+    MockEventSource.instances[0]!.emit('revision', { rev: 3 })
+    const restored = (await screen.findByRole('button', { name: 'Open' })) as HTMLElement
+    mockRect(restored, { left: 100, top: 160, width: 100, height: 40 })
+    fireEvent(window, new Event('resize'))
+    await waitFor(() => expect(composer.getAttribute('data-anchor')).toBe('available'))
+    expect(composer.querySelector('.dsx-review-pointer')).not.toBeNull()
+    fireEvent.change(screen.getByRole('textbox', { name: 'Comment text' }), { target: { value: 'Keep this text' } })
+  })
+
+  it('keeps a short pane editor clear of its target or drops the pointer', async () => {
+    render(React.createElement(App))
+    await ready()
+    await openComments()
+    const stage = document.querySelector('.dsx-stage') as HTMLElement
+    const frame = document.querySelector('.dsx-frame') as HTMLElement
+    const target = document.querySelector('[data-dsx-id="open"]') as HTMLElement
+    mockRect(stage, { left: 0, top: 60, width: 360, height: 300 })
+    mockRect(frame, { left: 0, top: 60, width: 1280, height: 300 })
+    mockRect(target, { left: 20, top: 100, width: 320, height: 55 })
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+    const composer = (await screen.findByRole('dialog', { name: 'Comment composer' })) as HTMLElement
+    await waitFor(() => expect(composer.getAttribute('data-dsx-balloon')).toBe('anchored'))
+    expect(composer.getAttribute('data-side')).toBe('bottom')
+    const balloonTop = Number.parseFloat(composer.style.top)
+    const targetBottom = target.getBoundingClientRect().bottom
+    expect(balloonTop).toBeGreaterThanOrEqual(targetBottom)
+    expect(Number.parseFloat(composer.style.maxHeight)).toBeLessThan(220)
+    expect(composer.querySelector('.dsx-review-pointer')).not.toBeNull()
+    fireEvent.change(screen.getByRole('textbox', { name: 'Comment text' }), {
+      target: { value: 'Kept in a short pane' },
+    })
+
+    mockRect(stage, { left: 0, top: 60, width: 360, height: 200 })
+    mockRect(frame, { left: 0, top: 60, width: 1280, height: 200 })
+    fireEvent(window, new Event('resize'))
+    await waitFor(() => expect(composer.getAttribute('data-detached')).toBe('space'))
+    expect(composer.getAttribute('data-dsx-balloon')).toBe('unanchored')
+    expect(composer.querySelector('.dsx-review-pointer')).toBeNull()
+    expect((screen.getByRole('textbox', { name: 'Comment text' }) as HTMLTextAreaElement).value).toBe(
+      'Kept in a short pane',
+    )
+
+    mockRect(stage, { left: 0, top: 60, width: 360, height: 300 })
+    mockRect(frame, { left: 0, top: 60, width: 1280, height: 300 })
+    fireEvent(window, new Event('resize'))
+    await waitFor(() => expect(composer.getAttribute('data-anchor')).toBe('available'))
+    expect(composer.querySelector('.dsx-review-pointer')).not.toBeNull()
+    expect((screen.getByRole('textbox', { name: 'Comment text' }) as HTMLTextAreaElement).value).toBe(
+      'Kept in a short pane',
+    )
+  })
+
   it('renders no review controls and requests no comments in deterministic mode', async () => {
     history.replaceState(null, '', '/design/session-test/?deterministic=1')
     ;(globalThis as Record<string, unknown>).__DSX_PROJECT__ = current

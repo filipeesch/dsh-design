@@ -199,7 +199,15 @@ pending sets.
 
 Keyboard selection moves through the visible components, selects a
 non-focusable structural node, exits with Escape without closing an open
-drawer, and restores focus. One session holds at most 50 pending comments; the
+drawer, and restores focus. The editor is a balloon beside the selected
+component with a pointer, kept inside the visible preview pane on a desktop
+browser at the desktop and Mobile breakpoints and in a narrow sidebar; the
+pin reopens it at the same component. The open editor follows the same anchor
+rules as its pin: another screen, state, variant, changed structural content, or
+a short pane with no non-overlapping side drops the arrow and keeps the text
+editable until the original anchor is valid again. A draft whose target is no
+longer available keeps its text editable from Pending without a false pointer.
+One session holds at most 50 pending comments; the
 batch limit is the same, so every accepted draft can be sent together, and the
 Comment control explains when the limit is reached.
 

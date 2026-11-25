@@ -462,14 +462,68 @@ body {
 .dsx-review-error {
   color: var(--dsw-alias-state-error-primary, #b91c1c);
 }
+/* The editor is a balloon anchored beside its component. Placement is inline
+   (left/top/width/max-height); the box stays compact even in a narrow pane. */
 .dsx-review-composer {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  width: min(360px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow: visible;
+}
+.dsx-review-balloon-body {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  width: min(380px, calc(100vw - 24px));
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
   padding-bottom: 8px;
 }
-.dsx-review-composer > *:not(header) {
+.dsx-review-composer.is-anchored {
+  right: auto;
+  bottom: auto;
+}
+.dsx-review-composer.is-unanchored {
+  right: 12px;
+  bottom: 12px;
+  left: auto;
+  top: auto;
+}
+.dsx-review-pointer {
+  position: absolute;
+  z-index: 1;
+  width: 0;
+  height: 0;
+  border: 7px solid transparent;
+  pointer-events: none;
+  filter: drop-shadow(0 1px 1px rgba(15, 23, 42, 0.18));
+}
+.dsx-review-composer[data-side='right'] .dsx-review-pointer {
+  left: -14px;
+  top: calc(var(--dsx-pointer, 24px) - 7px);
+  border-right-color: var(--dsw-alias-bg-layer-1, #ffffff);
+}
+.dsx-review-composer[data-side='left'] .dsx-review-pointer {
+  right: -14px;
+  top: calc(var(--dsx-pointer, 24px) - 7px);
+  border-left-color: var(--dsw-alias-bg-layer-1, #ffffff);
+}
+.dsx-review-composer[data-side='bottom'] .dsx-review-pointer {
+  top: -14px;
+  left: calc(var(--dsx-pointer, 24px) - 7px);
+  border-bottom-color: var(--dsw-alias-bg-layer-1, #ffffff);
+}
+.dsx-review-composer[data-side='top'] .dsx-review-pointer {
+  bottom: -14px;
+  left: calc(var(--dsx-pointer, 24px) - 7px);
+  border-top-color: var(--dsw-alias-bg-layer-1, #ffffff);
+}
+.dsx-review-away {
+  color: var(--dsw-alias-state-warn-primary, #b45309);
+}
+.dsx-review-balloon-body > *:not(header) {
   margin-left: 10px;
   margin-right: 10px;
 }
@@ -491,7 +545,6 @@ body {
     align-items: stretch;
   }
   .dsx-review-panel,
-  .dsx-review-composer,
   .dsx-review-hint,
   .dsx-review-status {
     width: auto;
