@@ -1,0 +1,10 @@
+<Journey id="checkout-price-details" start="checkout" state="prices-open" breakpoint="mobile">
+  <ExpectVisible target="price-breakdown" visible={true} />
+  <Tap target="price-details" />
+  <ExpectVisible target="price-breakdown" visible={false} />
+  <ExpectScreen screen="checkout" />
+  <Tap target="price-details" />
+  <ExpectVisible target="price-breakdown" visible={true} />
+  <Tap target="place-order" />
+  <ExpectScreen screen="confirmation" />
+</Journey>

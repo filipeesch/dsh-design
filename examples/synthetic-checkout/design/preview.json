@@ -1,0 +1,41 @@
+{
+  "screens": {
+    "catalog": {
+      "summary": "Browse the fictitious catalog and start a checkout."
+    },
+    "checkout": {
+      "summary": "Review the total, choose a delivery plan, and place a sample order.",
+      "details": "Price details open in place. Placing an order navigates to a confirmation screen without charging a payment method."
+    },
+    "confirmation": {
+      "summary": "Confirm that the sample order flow reached its end."
+    }
+  },
+  "groups": [
+    {
+      "id": "purchase-flow",
+      "label": "Purchase flow",
+      "screens": ["catalog", "checkout", "confirmation"]
+    }
+  ],
+  "situations": [
+    {
+      "id": "price-breakdown",
+      "label": "Price breakdown open",
+      "parent": "checkout",
+      "target": {
+        "screen": "checkout",
+        "state": "prices-open"
+      }
+    },
+    {
+      "id": "review-drawer",
+      "label": "Review drawer open",
+      "parent": "checkout",
+      "target": {
+        "screen": "checkout",
+        "state": "review-open"
+      }
+    }
+  ]
+}

@@ -7,7 +7,9 @@ import { expandScreen } from '../src/fixtures.ts'
 import { parseJourney, validateJourney } from '../src/journey.ts'
 import { parseScreen } from '../src/parse.ts'
 import { loadProject } from '../src/project.ts'
-import { extractNamedStates } from '../src/state.ts'
+import { canonicalState, renderNamedStates } from '../src/handoff.ts'
+import { extractNamedStates, stateCompatibility } from '../src/state.ts'
+import { projectScreen } from '../src/view.ts'
 import type { DesignChild, DesignElement } from '../src/types.ts'
 
 const kitVersion = '1.0.0'
@@ -105,6 +107,72 @@ describe('named screen states', () => {
     expect(diagnostic.file).toBe('screens/orders.dsx')
     expect(diagnostic.line).toBeGreaterThan(0)
     expect(loaded.screens[0]?.states).toEqual([])
+  })
+
+  it('rejects missing, incompatible, non-boolean, and non-map disclosure assignments', async () => {
+    const { folder } = await project()
+    const source = screenSource(
+      '{ "invalid": { disclosures: { "missing": true, "search": true, "details": "true" } }, "wrong-shape": { disclosures: ["details"] }, "overlay": { open: ["details"] }, "field": { values: { details: true } } }',
+    ).replace('</Screen>', '<Disclosure id="details" label="Details" /></Screen>')
+    await writeFile(join(folder, 'screens', 'orders.dsx'), source)
+    const loaded = await load(folder)
+    expect(loaded.screens[0]?.states).toEqual([])
+    expect(loaded.diagnostics.map(({ code }) => code)).toEqual(
+      expect.arrayContaining([
+        'state-disclosure-missing',
+        'state-disclosure-target',
+        'state-disclosure-value',
+        'state-disclosures-shape',
+        'state-open-not-overlay',
+        'state-value-target',
+      ]),
+    )
+    for (const diagnostic of loaded.diagnostics) {
+      expect(diagnostic.file).toBe('screens/orders.dsx')
+      expect(diagnostic.line).toBeGreaterThan(0)
+      expect(diagnostic.column).toBeGreaterThan(0)
+    }
+  })
+
+  it('checks disclosure seed compatibility with the resolved projection', () => {
+    const parsed = parseScreen('<Screen id="orders"><Input id="details" /></Screen>', 'screens/orders.dsx')
+    expect(
+      stateCompatibility(
+        parsed.root!,
+        {
+          name: 'expanded',
+          open: [],
+          tabs: {},
+          values: {},
+          disclosures: { details: true, absent: false },
+          source: { file: 'screens/orders.dsx', line: 1, column: 1 },
+        },
+        kitMetadata,
+      ),
+    ).toEqual([
+      'seeds "details", which is not a Disclosure in this projection',
+      'seeds disclosure "absent", which this projection does not render',
+    ])
+  })
+
+  it('projects authored defaults, responsive defaults, and explicit disclosure seeds', () => {
+    const parsed = parseScreen(
+      '<Screen id="orders"><Disclosure id="price" label="Price">Price answer</Disclosure>' +
+        '<Disclosure id="shipping" label="Shipping" defaultOpen={{ mobile: false, desktop: true }}>' +
+        '<Text>Shipping answer</Text></Disclosure></Screen>',
+      'screens/orders.dsx',
+    )
+    const breakpoints = [
+      { name: 'mobile', width: 390 },
+      { name: 'desktop', width: 1280 },
+    ]
+    const mobile = projectScreen(parsed.root!, { breakpoints, breakpoint: 'mobile' }).text
+    expect(mobile).not.toContain('Price answer')
+    expect(mobile).not.toContain('Shipping answer')
+    expect(projectScreen(parsed.root!, { breakpoints }).text).toContain('Shipping answer')
+    const seeded = projectScreen(parsed.root!, { breakpoints, disclosures: { price: true, shipping: false } }).text
+    expect(seeded).toContain('Price answer')
+    expect(seeded).not.toContain('Shipping answer')
   })
 
   it('reports duplicate state names at the states prop', async () => {
@@ -212,6 +280,29 @@ describe('fixtures and collection binding', () => {
       { value: 'pro', label: 'Pro' },
     ])
     expect(JSON.stringify(root)).toContain('Inline row')
+  })
+
+  it('seeds independent fixture-expanded disclosure ids and round-trips boolean seeds', async () => {
+    const { folder } = await project()
+    const path = join(folder, 'screens', 'orders.dsx')
+    await writeFixtures(folder)
+    const source =
+      '<Screen id="orders" states={{ expanded: { disclosures: { "rows-order-2-details": true, "rows-order-1-details": false } } }}>' +
+      '<List id="rows" items={fixture("orders")}><ItemTemplate>' +
+      '<Disclosure id="details" label="Details"><Text>{item("name")}</Text></Disclosure>' +
+      '</ItemTemplate></List></Screen>'
+    await writeFile(path, source)
+    const first = await load(folder)
+    expect(first.diagnostics).toEqual([])
+    const states = first.screens[0]!.states
+    expect(states[0]?.disclosures).toEqual({ 'rows-order-2-details': true, 'rows-order-1-details': false })
+    await writeFixtures(folder, [...orders].reverse())
+    await writeFile(path, source.replace(/states={.*?}>/, 'states={' + renderNamedStates(states) + '}>'))
+    const second = await load(folder)
+    expect(second.diagnostics).toEqual([])
+    expect(JSON.stringify(second.screens[0]!.states.map(canonicalState))).toBe(
+      JSON.stringify(states.map(canonicalState)),
+    )
   })
 
   it('keeps repeated identities stable across fixture reordering', async () => {

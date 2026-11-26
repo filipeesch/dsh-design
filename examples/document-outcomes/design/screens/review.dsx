@@ -1,0 +1,44 @@
+<Screen id="review" title="Review status" maxWidth="spacing.reading" background="color.canvas" states={{ approved: { tabs: { "review-stage": "approved" } }, "needs-correction": { tabs: { "review-stage": "correction" }, disclosures: { "correction-details": true } } }}>
+  <Header title="Review status" subtitle="Reading room guide · HA-104" background="color.paper" padding="spacing.lg" />
+  <Stack gap="spacing.lg" padding="spacing.lg">
+    <Tabs id="review-stage" compact value="pending">
+      <Tab id="pending-tab" label="Waiting" value="pending">
+        <Card variant="outlined" padding="spacing.lg" background="color.paper" radius="radius.md">
+          <Stack gap="spacing.sm" align="start">
+            <Badge tone="info">In review</Badge>
+            <Text id="pending-message" variant="heading">Waiting for editorial review</Text>
+            <Text color="color.ink">The draft is queued. No changes are needed while the reviewers read the guide.</Text>
+          </Stack>
+        </Card>
+      </Tab>
+      <Tab id="approved-tab" label="Approved" value="approved">
+        <Card variant="outlined" padding="spacing.lg" background="color.paper" radius="radius.md">
+          <Stack gap="spacing.sm" align="start">
+            <Badge tone="success">Approved</Badge>
+            <Text id="approved-message" variant="heading">Approved for publication</Text>
+            <Text color="color.ink">The editorial review is complete. This sample guide is ready for the reading room.</Text>
+          </Stack>
+        </Card>
+      </Tab>
+      <Tab id="correction-tab" label="Corrections" value="correction">
+        <Card variant="outlined" padding="spacing.lg" background="color.paper" radius="radius.md">
+          <Stack gap="spacing.md">
+            <Stack gap="spacing.sm" align="start">
+              <Badge tone="warning">Changes requested</Badge>
+              <Text id="correction-message" variant="heading">Revise the opening hours</Text>
+              <Text color="color.ink">The reviewers found one fact to check before publication.</Text>
+            </Stack>
+            <Disclosure id="correction-details" label="Editorial note">
+              <Stack id="correction-note" padding="spacing.md" background="color.accent" radius="radius.md">
+                <Text color="color.ink">Add the Saturday opening time to the visitor information section, then submit the guide again.</Text>
+              </Stack>
+            </Disclosure>
+          </Stack>
+        </Card>
+      </Tab>
+    </Tabs>
+    <Stack align="start">
+      <Button id="back-to-document" variant="secondary" size="lg" onPress={navigate("document")}>Back to document</Button>
+    </Stack>
+  </Stack>
+</Screen>

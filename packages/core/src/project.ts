@@ -14,6 +14,7 @@ import { expandScreen, loadFixtures } from './fixtures.ts'
 import { parseJourney, validateJourney } from './journey.ts'
 import type { KitMetadata } from './metadata.ts'
 import { parseScreen } from './parse.ts'
+import { loadPreviewMetadata } from './preview.ts'
 import { extractNamedStates } from './state.ts'
 import { validateTree, type ValidationContext } from './validate.ts'
 import { parseTokens } from './tokens.ts'
@@ -672,12 +673,14 @@ export async function loadProject(options: LoadProjectOptions): Promise<DesignPr
     }
   })
 
+  const metadata = await loadPreviewMetadata(folder, screenResults)
   const perScreen = screenResults.flatMap((screen) => screen.diagnostics)
   const perJourney = journeys.flatMap((journey) => journey.diagnostics)
   const allDiagnostics = sortDiagnostics([
     ...configTokenDiagnostics,
     ...screenDiagnostics,
     ...journeyDiagnostics,
+    ...metadata.diagnostics,
     ...perScreen,
     ...perJourney,
   ])
@@ -702,5 +705,6 @@ export async function loadProject(options: LoadProjectOptions): Promise<DesignPr
     entry,
     fixtures: loadedFixtures.collections,
     journeys,
+    ...(metadata.preview === undefined ? {} : { preview: metadata.preview }),
   }
 }

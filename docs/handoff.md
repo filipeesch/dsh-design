@@ -45,6 +45,20 @@ Supporting screens are marked in `manifest.support.screens` and
 screenshots, or projections. Journeys outside the selected matrix are listed in
 `outsideScreens`; unrelated screens and flows are excluded.
 
+## Durable preview context
+
+The manifest preserves relevant screen descriptions, situations, and labeled
+relationships for the selected evidence. **Prototype** edges reflect chosen
+source actions; **illustrative** and **simulated** edges describe intent.
+Endpoints outside the requested projections are identified as such. Descriptive
+edges alone do not add an executable source dependency or an extra render.
+
+Simulation buttons, session comments, and preview controls are not exported.
+The relevant context contributes to the content identity, so a meaningful
+metadata change produces a new package rather than replacing prior evidence.
+See [authoring and preview](authoring.md#add-optional-review-context) for the
+source format.
+
 ## Package contents
 
 ```text

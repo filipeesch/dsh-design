@@ -9,11 +9,9 @@ import {
   countDiagnostics,
   designPrompt,
   handoffPrompt,
-  editDistance,
   formatDiagnostic,
   loadProject,
   projectScreen,
-  propsOf,
   resolveHandoffPlan,
   scaffoldProject,
   sortDiagnostics,
@@ -25,19 +23,28 @@ import { KIT_VERSION, componentNames, kitMetadata } from '@filipeesch/dsh-design
 import { BrowserSessions } from './browser.ts'
 import { DesignBrowserError } from './browser.ts'
 import { PackageError } from './cache.ts'
-import { captureScreenshot, payloadFor, readSnapshot, runJourney, runLint, type CheckContext } from './checks.ts'
+import { catalogOutputSchema, designCatalog, formatCatalog, MAX_CATALOG_NAMES } from './catalog.ts'
+import {
+  captureScreenshot,
+  measureSelection,
+  resolveCheckSelection,
+  runJourney,
+  runLint,
+  type CheckContext,
+} from './checks.ts'
+import type { MediaDiagnostic } from './deterministic.ts'
+import { screenshotAttachment, type ToolContent } from './screenshot-result.ts'
 import { HandoffError, runHandoff } from './handoff.ts'
 import { queryDesign } from './query.ts'
 import { diffGitRevisions, diffVariantBranches, formatDesignDiff } from './diff.ts'
 import { compatibleState, resolveScreenProjection } from './projection.ts'
-import { changedFiles, fingerprintFolder, type FolderFingerprint } from './runtime.ts'
+import { summarizeDiagnosticDelta } from './diagnostic-delta.ts'
+import { changedFiles, fingerprintFolder } from './runtime.ts'
 
 /** Plugin name. */
 export const name = 'design-tools'
 /** Required services: the tool registry, the design host, and prompt sections. */
 export const inject = ['tools', 'design', 'systemPrompt']
-
-const MAX_ATTACHED = 10
 
 interface ParameterSpec {
   type?: 'string' | 'number' | 'boolean' | 'array'
@@ -51,7 +58,7 @@ interface ToolOptions {
   name: string
   description: string
   parameters: Record<string, ParameterSpec>
-  output: { schema: Record<string, unknown>; render: (args: any, value: any) => Array<{ type: 'text'; text: string }> }
+  output: { schema: Record<string, unknown>; render: (args: any, value: any) => ToolContent[] }
   execute: (args: any, exec: any) => Promise<unknown>
 }
 
@@ -100,6 +107,10 @@ function tool(options: ToolOptions): Record<string, unknown> {
       if (args === null || typeof args !== 'object' || Array.isArray(args))
         throw new Error(options.name + ': arguments must be an object')
       const record = args as Record<string, unknown>
+      for (const name of Object.keys(record)) {
+        if (!Object.hasOwn(options.parameters, name))
+          throw new Error(options.name + ': unknown argument "' + name + '"')
+      }
       for (const [name, spec] of Object.entries(options.parameters)) {
         const value = record[name]
         if (value === undefined) {
@@ -177,36 +188,6 @@ async function loadForSession(
   return { facts, folder, project }
 }
 
-/** Human-readable diagnostic summary, capped. */
-function summarize(diagnostics: readonly Diagnostic[], cap = MAX_ATTACHED): string {
-  const counts = countDiagnostics(diagnostics)
-  if (diagnostics.length === 0) return 'Design validation: no problems in the changed design files.'
-  const lines = diagnostics.slice(0, cap).map((diagnostic) => '  ' + formatDiagnostic(diagnostic))
-  const more = diagnostics.length > cap ? '\n  … ' + String(diagnostics.length - cap) + ' more' : ''
-  return (
-    'Design validation: ' +
-    String(counts.errors) +
-    ' error(s), ' +
-    String(counts.warnings) +
-    ' warning(s).\n' +
-    lines.join('\n') +
-    more
-  )
-}
-
-/** Filter project diagnostics to the changed files. */
-function diagnosticsForFiles(project: DesignProject, files: readonly string[]): Diagnostic[] {
-  const changed = new Set(files)
-  return sortDiagnostics(
-    project.diagnostics.filter(
-      (diagnostic) =>
-        changed.has(diagnostic.file) ||
-        (changed.has('tokens.json') && diagnostic.file === 'tokens.json') ||
-        (changed.has('design.json') && diagnostic.file === 'design.json'),
-    ),
-  )
-}
-
 /** Read screen diagnostics for a design_validate scope. */
 function scopedDiagnostics(project: DesignProject, scope: string, file?: string, screen?: string): Diagnostic[] {
   if (scope === 'file') {
@@ -235,6 +216,69 @@ function text(value: unknown): Array<{ type: 'text'; text: string }> {
   return [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }]
 }
 
+function usableStates(screen: DesignProject['screens'][number]): string[] {
+  return screen.states.flatMap((state) => {
+    try {
+      compatibleState(screen, screen.states, state.name)
+      return [state.name]
+    } catch {
+      return []
+    }
+  })
+}
+
+function selectionLabel(value: {
+  screen: string
+  state?: string
+  variant?: { path: string; branch: string }
+  selection?: Record<string, string>
+}): string {
+  const branches = Object.entries(value.selection ?? {}).map(([group, branch]) => group + ':' + branch)
+  return (
+    'screen=' +
+    JSON.stringify(value.screen) +
+    ' state=' +
+    (value.state === undefined ? '(default)' : JSON.stringify(value.state)) +
+    ' variant=' +
+    (value.variant === undefined ? '(chosen)' : JSON.stringify(value.variant.path + ':' + value.variant.branch)) +
+    (branches.length === 0 ? '' : ' [' + branches.join(', ') + ']')
+  )
+}
+
+function formatMedia(media: readonly MediaDiagnostic[]): string {
+  if (media.length === 0) return ''
+  return (
+    '\nMedia issues (' +
+    String(media.length) +
+    '; separate from geometry):\n' +
+    media
+      .slice(0, 20)
+      .map(
+        (item) =>
+          '  ' +
+          item.code +
+          ' [' +
+          item.breakpoint +
+          '] ' +
+          item.reference +
+          ' at ' +
+          item.file +
+          ':' +
+          String(item.line) +
+          ':' +
+          String(item.column) +
+          (item.node === undefined ? '' : ' (' + item.node + ')') +
+          ': ' +
+          item.remediation,
+      )
+      .join('\n') +
+    (media.length > 20 ? '\n  … ' + String(media.length - 20) + ' more' : '')
+  )
+}
+
+const mediaSchema = { type: 'array', items: { type: 'object', additionalProperties: true, properties: {} } }
+const selectionSchema = { type: 'object', additionalProperties: true, properties: {} }
+
 /** Project-relative path with forward slashes for tool results and artifacts. */
 async function projectPath(cwd: string, folder: string, absolute: string): Promise<string> {
   const realCwd = await realpath(cwd)
@@ -246,8 +290,7 @@ async function projectPath(cwd: string, folder: string, absolute: string): Promi
 
 /** Register the design tools and automatic validation. */
 export function apply(ctx: any): void {
-  const changes = new Map<symbol, { folder: string; files: string[] }>()
-  const pending = new Map<symbol, { folder: string; files: Set<string> }>()
+  const editReports = new Map<symbol, string>()
 
   ctx.systemPrompt.section({
     name: 'design:guidance',
@@ -263,73 +306,42 @@ export function apply(ctx: any): void {
   })
 
   ctx.on('tools/execute', async (exec: any, next: () => Promise<any>) => {
+    // The enclosing call brackets all nested writes, including edits undone before it returns.
     const session = exec.agent?.session
-    if (session === undefined) return next()
+    if (session === undefined || exec.parent !== undefined) return next()
     const cwd = ctx.design.resolveSessionCwd(session.id) as string | undefined
     if (cwd === undefined) return next()
     const folder = ctx.design.folderForCwd(cwd) as string
     ctx.design.registry.learnSession(session.id, cwd)
-    let before: FolderFingerprint
-    try {
-      before = await fingerprintFolder(folder)
-    } catch {
-      return next()
-    }
+    const readProject = () => loadProject({ folder, kit: kitMetadata, installedKitVersion: KIT_VERSION })
+    const before = await fingerprintFolder(folder).catch(() => undefined)
+    if (before === undefined) return next()
+    const beforeProject = await readProject().catch(() => undefined)
     const result = await next()
+    const after = await fingerprintFolder(folder).catch(() => undefined)
+    if (after === undefined || changedFiles(before, after).length === 0) return result
+    const afterProject = await readProject().catch(() => undefined)
+    const report =
+      beforeProject === undefined || afterProject === undefined
+        ? 'Design validation could not compare the edited project. Run design_validate for current diagnostics.'
+        : summarizeDiagnosticDelta(beforeProject.diagnostics, afterProject.diagnostics)
+    if (report !== undefined) editReports.set(exec.token, report)
     try {
-      const after = await fingerprintFolder(folder)
-      const files = changedFiles(before, after)
-      if (files.length > 0) {
-        changes.set(exec.token, { folder, files })
-        if (exec.parent !== undefined) {
-          const entry = pending.get(exec.parent) ?? { folder, files: new Set<string>() }
-          for (const file of files) entry.files.add(file)
-          pending.set(exec.parent, entry)
-        }
-        try {
-          await ctx.design.registry.forFolder(folder).reload()
-        } catch {
-          // Validation below reports a broken project; preview updates on the watcher.
-        }
-      }
+      await ctx.design.registry.forFolder(folder).reload()
     } catch {
-      // Fingerprint failure means no reliable changed set; skip attachment.
+      // Leave preview recovery to its watcher; validation has already read current source.
     }
     return result
   })
 
   ctx.on('tools/post-execute', async (exec: any, _result: any, next: () => Promise<any>) => {
+    const report = editReports.get(exec.token)
+    editReports.delete(exec.token)
     const decision = await next()
-    const own = changes.get(exec.token)
-    changes.delete(exec.token)
-    const child = pending.get(exec.token)
-    pending.delete(exec.token)
-    const combined = new Set<string>(own?.files ?? [])
-    if (child !== undefined) for (const file of child.files) combined.add(file)
-    const contextText: string[] = []
-    if (exec.parent !== undefined && combined.size > 0) {
-      // Nested calls aggregate onto the enclosing call; the model sees one summary.
-      const parent = pending.get(exec.parent) ?? {
-        folder: own?.folder ?? (ctx.design.folderForCwd(sessionCwd(exec.agent)) as string),
-        files: new Set<string>(),
-      }
-      for (const file of combined) parent.files.add(file)
-      pending.set(exec.parent, parent)
-      return decision
-    }
-    if (combined.size > 0 && own !== undefined) {
-      try {
-        const project = await loadProject({ folder: own.folder, kit: kitMetadata, installedKitVersion: KIT_VERSION })
-        contextText.push(summarize(diagnosticsForFiles(project, [...combined])))
-      } catch (error) {
-        contextText.push('Design validation failed: ' + (error instanceof Error ? error.message : String(error)))
-      }
-    }
-    if (contextText.length === 0) return decision
-    const message = userMessage(contextText.join('\n'))
+    if (report === undefined) return decision
     return {
       ...decision,
-      additionalContexts: [...(decision.additionalContexts ?? []), message],
+      additionalContexts: [...(decision.additionalContexts ?? []), userMessage(report)],
     }
   })
 
@@ -381,7 +393,7 @@ export function apply(ctx: any): void {
     tool({
       name: 'design_status',
       description:
-        'Report whether a design project exists, its screens, kit versions, diagnostics counts, and the preview URL.',
+        'Report project selectors, kit versions, diagnostic counts, preview URL, and browser readiness without launching Chromium.',
       parameters: {},
       output: {
         schema: {
@@ -394,6 +406,8 @@ export function apply(ctx: any): void {
             kitVersion: { type: 'string' },
             installedKitVersion: { type: 'string', required: true },
             entry: { type: 'string' },
+            breakpoints: { type: 'array', items: { type: 'object', additionalProperties: true, properties: {} } },
+            browser: { type: 'object', additionalProperties: true, properties: {} },
             screens: {
               type: 'array',
               required: true,
@@ -418,21 +432,63 @@ export function apply(ctx: any): void {
             message: { type: 'string' },
           },
         },
-        render: (_args: unknown, value: any) =>
-          text(
-            value.exists
-              ? 'Design project at ' +
+        render: (_args: unknown, value: any) => {
+          const lines = value.exists
+            ? [
+                'Design project at ' +
                   value.folder +
                   ': ' +
-                  value.screens.length +
-                  ' screen(s), ' +
-                  value.errors +
+                  String(value.errors) +
                   ' error(s), ' +
-                  value.warnings +
-                  ' warning(s). Preview: ' +
-                  value.previewUrl
-              : value.message + ' Preview: ' + value.previewUrl,
-          ),
+                  String(value.warnings) +
+                  ' warning(s). Kit pinned: ' +
+                  (value.kitVersion ?? '(not set)') +
+                  '; installed: ' +
+                  value.installedKitVersion +
+                  '.',
+                'Entry: ' + (value.entry ?? '(none)') + '.',
+                'Breakpoints: ' +
+                  (value.breakpoints
+                    .map((bp: any) => 'breakpoint=' + JSON.stringify(bp.name) + ' (' + String(bp.width) + 'px)')
+                    .join(', ') || '(none)'),
+              ]
+            : [value.message]
+          lines.push('Preview: ' + value.previewUrl)
+          for (const screen of value.screens) {
+            lines.push(
+              '  screen=' +
+                JSON.stringify(screen.id) +
+                ' (' +
+                screen.file +
+                ')' +
+                (screen.states.length === 0
+                  ? ''
+                  : '; ' + screen.states.map((state: string) => 'state=' + JSON.stringify(state)).join(', ')),
+            )
+            for (const variant of screen.selectors) {
+              lines.push(
+                '    variant=' +
+                  JSON.stringify(variant.selector) +
+                  (variant.states.length === 0
+                    ? ''
+                    : '; ' + variant.states.map((state: string) => 'state=' + JSON.stringify(state)).join(', ')),
+              )
+            }
+          }
+          if (value.browser !== undefined) {
+            lines.push(
+              'Browser: ' +
+                value.browser.status +
+                ' (' +
+                value.browser.source +
+                (value.browser.executablePath === undefined ? '' : ': ' + value.browser.executablePath) +
+                ').',
+            )
+            if (value.browser.error !== undefined) lines.push('Last launch error: ' + value.browser.error)
+            lines.push(value.browser.guidance)
+          }
+          return text(lines.join('\n'))
+        },
       },
       async execute(_args: unknown, exec: any) {
         const { facts, folder, project } = await loadForSession(ctx, exec)
@@ -443,13 +499,35 @@ export function apply(ctx: any): void {
           folder,
           previewUrl: ctx.design.previewUrl(facts.sessionId),
           installedKitVersion: KIT_VERSION,
+          breakpoints: exists ? project.config.breakpoints : [],
+          browser: ctx.design.browsers.readiness(),
           ...(project.config.kitVersion === '' ? {} : { kitVersion: project.config.kitVersion }),
           ...(project.entry === undefined ? {} : { entry: project.entry }),
           screens: project.screens
             .filter((screen) => screen.id !== '')
             .map((screen) => {
               const screenCounts = countDiagnostics(screen.diagnostics)
-              return { id: screen.id, file: screen.file, errors: screenCounts.errors, warnings: screenCounts.warnings }
+              const selectors = (screen.variants ?? []).flatMap((group) =>
+                group.branches.flatMap((branch) => {
+                  if (!branch.valid || branch.stale || screen.variantDocumentCurrent !== true) return []
+                  const selector = group.path + ':' + branch.id
+                  try {
+                    return [
+                      { selector, states: usableStates(resolveScreenProjection(project, screen.id, selector).screen) },
+                    ]
+                  } catch {
+                    return []
+                  }
+                }),
+              )
+              return {
+                id: screen.id,
+                file: screen.file,
+                errors: screenCounts.errors,
+                warnings: screenCounts.warnings,
+                states: (screen.blockingErrors ?? screenCounts.errors) === 0 ? usableStates(screen) : [],
+                selectors,
+              }
             }),
           variants: project.screens.flatMap((screen) =>
             (screen.variants ?? []).map((group) => ({
@@ -558,15 +636,19 @@ export function apply(ctx: any): void {
             state: { type: 'string' },
             variant: { type: 'object', additionalProperties: true, properties: {} },
             breakpoint: { type: 'string' },
+            selection: selectionSchema,
+            media: mediaSchema,
             layout: { type: 'object', additionalProperties: true, properties: {} },
             screens: { type: 'array', items: { type: 'string' } },
           },
         },
         render: (_args: unknown, value: any) => {
           if (value.error !== undefined) return text(value.error)
-          if (value.layout === undefined) return text(value.text)
+          if (value.layout === undefined) return text(selectionLabel(value) + '\n' + value.text)
           return text(
-            value.text +
+            selectionLabel(value) +
+              '\n' +
+              value.text +
               '\n\nLayout at ' +
               String(value.breakpoint) +
               ' (' +
@@ -591,125 +673,55 @@ export function apply(ctx: any): void {
                     String(node.height),
                 )
                 .join('\n') +
-              (value.layout.truncated === true ? '\n  … snapshot truncated' : ''),
+              (value.layout.truncated === true ? '\n  … snapshot truncated' : '') +
+              formatMedia(value.media),
           )
         },
       },
       async execute(args: any, exec: any) {
-        const { facts, project } = await loadForSession(ctx, exec)
+        const { project } = await loadForSession(ctx, exec)
         const available = project.screens.filter((screen) => screen.id !== '').map((screen) => screen.id)
-        const screenId = args.screen ?? project.entry
-        const screen = project.screens.find((candidate) => candidate.id === screenId)
-        if (screen === undefined) {
-          return {
-            screen: screenId ?? '',
-            text: '',
-            error: 'No screen "' + String(screenId) + '" with a parsed tree.',
-            screens: available,
-          }
-        }
-        if (screen.root === undefined && args.variant === undefined) {
-          return {
-            screen: screen.id,
-            text: '',
-            error: 'No screen "' + String(screen.id) + '" with a parsed tree.',
-            screens: available,
-          }
-        }
-        let projection
+        const screenId = args.screen ?? project.entry ?? ''
         try {
-          projection = resolveScreenProjection(project, screen.id, args.variant)
-        } catch (error) {
-          return {
-            screen: screen.id,
-            text: '',
-            error: error instanceof Error ? error.message : String(error),
-            screens: available,
+          const selected = resolveCheckSelection(
+            project,
+            screenId,
+            args,
+            args.breakpoint === undefined ? 'static' : 'one',
+          )
+          const { named, variant, selection, root } = selected
+          const view = projectScreen(root, {
+            ...(args.depth === undefined ? {} : { depth: args.depth }),
+            ...(args.node === undefined ? {} : { node: args.node }),
+            ...(args.open === undefined ? {} : { openOverlays: args.open }),
+            ...(named === undefined ? {} : { openIds: named.open }),
+            ...(named?.disclosures === undefined ? {} : { disclosures: named.disclosures }),
+            breakpoints: project.config.breakpoints,
+            breakpoint: selected.breakpoints[0]?.name,
+          })
+          const base = {
+            screen: screenId,
+            text: view.text,
+            selection,
+            ...(view.node === undefined ? {} : { node: view.node }),
+            ...(named === undefined ? {} : { state: named.name }),
+            ...(variant === undefined ? {} : { variant }),
           }
-        }
-        const projected = projection.screen
-        let named
-        try {
-          named = compatibleState(projected, projected.states, args.state)
-        } catch (error) {
-          return {
-            screen: screen.id,
-            text: '',
-            ...(projection.variant === undefined ? {} : { variant: projection.variant }),
-            error: error instanceof Error ? error.message : String(error),
-            screens: available,
-          }
-        }
-        if (args.breakpoint !== undefined) {
-          const known = project.config.breakpoints.some((breakpoint) => breakpoint.name === args.breakpoint)
-          if (!known) {
-            return {
-              screen: screen.id,
-              text: '',
-              error: 'Unknown breakpoint "' + String(args.breakpoint) + '".',
-              screens: available,
-            }
-          }
-        }
-        const view = projectScreen(projected.root as NonNullable<typeof projected.root>, {
-          ...(args.depth === undefined ? {} : { depth: args.depth }),
-          ...(args.node === undefined ? {} : { node: args.node }),
-          ...(args.open === undefined ? {} : { openOverlays: args.open }),
-          ...(named === undefined ? {} : { openIds: named.open }),
-        })
-        const base = {
-          screen: screen.id,
-          text: view.text,
-          ...(view.node === undefined ? {} : { node: view.node }),
-          ...(args.state === undefined ? {} : { state: args.state }),
-          ...(projection.variant === undefined ? {} : { variant: projection.variant }),
-        }
-        if (args.breakpoint === undefined) return base
-        const screenErrors = projected.blockingErrors ?? countDiagnostics(projected.diagnostics).errors
-        if (screenErrors > 0) {
+          if (args.breakpoint === undefined) return base
+          if (args.node !== undefined && view.node === undefined) throw new Error('Unknown node "' + args.node + '".')
           return {
             ...base,
-            text: '',
             breakpoint: args.breakpoint,
-            error:
-              'Screen "' +
-              screen.id +
-              '" has ' +
-              String(screenErrors) +
-              ' validation error(s); fix them before requesting computed layout.',
+            ...(await measureSelection(checkContext(ctx, exec), project, selected)),
           }
-        }
-        try {
-          const payload = await payloadFor(
-            project,
-            facts.sessionId,
-            projection.variant === undefined
-              ? undefined
-              : { screen: screen.id, group: projection.variant.path, branch: projection.variant.branch },
-          )
-          const check = checkContext(ctx, exec)
-          const layout = await check.browsers.run(
-            {
-              sessionId: check.sessionId,
-              payload,
-              assetsDir: check.assetsDir,
-              screen: screen.id,
-              breakpoint: args.breakpoint,
-              breakpointWidth: (
-                project.config.breakpoints.find((candidate) => candidate.name === args.breakpoint) as { width: number }
-              ).width,
-              ...(args.state === undefined ? {} : { state: args.state }),
-              ...(check.signal === undefined ? {} : { signal: check.signal }),
-              ...(check.timeoutMs === undefined ? {} : { timeoutMs: check.timeoutMs }),
-            },
-            (page) => readSnapshot(page, screen.id, args.breakpoint, args.state),
-          )
-          return { ...base, breakpoint: args.breakpoint, layout }
         } catch (error) {
-          if (error instanceof DesignBrowserError) {
-            return { ...base, text: '', breakpoint: args.breakpoint, error: error.message, errorCode: error.code }
+          return {
+            screen: screenId,
+            text: '',
+            screens: available,
+            error: error instanceof Error ? error.message : String(error),
+            errorCode: error instanceof DesignBrowserError ? error.code : 'invalid-selection',
           }
-          throw error
         }
       },
     }),
@@ -719,96 +731,24 @@ export function apply(ctx: any): void {
     tool({
       name: 'design_catalog',
       description:
-        "List kit components, or return one component's props, values, defaults, and a minimal example; unknown names return the closest matches.",
+        'Index kit components, DSX constructs, and composition recipes, or look up details with props and validated examples. Batch related names in one call.',
       parameters: {
-        name: { type: 'string', description: 'Component name; omit to list every component.' },
+        name: { type: 'string', description: 'One exact catalog name. Omit name and names for the index.' },
+        names: {
+          type: 'array',
+          items: 'string',
+          description:
+            '1–' +
+            String(MAX_CATALOG_NAMES) +
+            ' component, DSX construct, or recipe names in desired order; omit name.',
+        },
       },
       output: {
-        schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            components: {
-              type: 'array',
-              items: {
-                type: 'object',
-                additionalProperties: true,
-                properties: {
-                  name: { type: 'string' },
-                  description: { type: 'string' },
-                  category: { type: 'string' },
-                  tier: { type: 'number' },
-                },
-              },
-            },
-            name: { type: 'string' },
-            description: { type: 'string' },
-            props: { type: 'array', items: { type: 'object', additionalProperties: true, properties: {} } },
-            example: { type: 'string' },
-            error: { type: 'string' },
-            closest: { type: 'array', items: { type: 'string' } },
-          },
-        },
-        render: (_args: unknown, value: any) =>
-          text(
-            value.error !== undefined
-              ? value.error + ' Closest: ' + value.closest.join(', ')
-              : value.components !== undefined
-                ? value.components.map((component: any) => component.name + ' — ' + component.description).join('\n')
-                : '<' +
-                  value.name +
-                  '> ' +
-                  value.description +
-                  '\n' +
-                  value.props
-                    .map(
-                      (prop: any) =>
-                        '  ' +
-                        prop.name +
-                        ': ' +
-                        prop.kind +
-                        (prop.values === undefined ? '' : ' (' + prop.values.join(' | ') + ')') +
-                        (prop.required ? ' required' : '') +
-                        ' — ' +
-                        prop.description,
-                    )
-                    .join('\n') +
-                  '\n\nExample:\n' +
-                  value.example,
-          ),
+        schema: catalogOutputSchema,
+        render: (_args: unknown, value: ReturnType<typeof designCatalog>) => text(formatCatalog(value)),
       },
-      async execute(args: any) {
-        if (args.name === undefined) {
-          const components = componentNames.map((componentName) => {
-            const meta = kitMetadata[componentName] as any
-            return { name: meta.name, description: meta.description, category: meta.category, tier: meta.tier }
-          })
-          return { components }
-        }
-        const meta = kitMetadata[args.name]
-        if (meta === undefined) {
-          return {
-            error: 'Unknown component "' + String(args.name) + '".',
-            closest: componentNames
-              .map((candidate) => ({ candidate, distance: editDistance(String(args.name), candidate) }))
-              .sort((left, right) => left.distance - right.distance || left.candidate.localeCompare(right.candidate))
-              .slice(0, 3)
-              .map((entry) => entry.candidate),
-          }
-        }
-        return {
-          name: meta.name,
-          description: meta.description,
-          props: propsOf(meta).map((prop) => ({
-            name: prop.name,
-            kind: prop.kind,
-            ...(prop.values === undefined ? {} : { values: prop.values }),
-            ...(prop.required === undefined ? {} : { required: prop.required }),
-            ...(prop.default === undefined ? {} : { default: prop.default }),
-            description: prop.description,
-          })),
-          example: meta.example,
-        }
+      async execute(args: Parameters<typeof designCatalog>[0]) {
+        return designCatalog(args)
       },
     }),
   )
@@ -904,6 +844,10 @@ export function apply(ctx: any): void {
         screen: { type: 'string', required: true, description: 'Screen id to lint.' },
         state: { type: 'string', description: 'Named screen state to apply before measuring.' },
         breakpoint: { type: 'string', description: 'One configured breakpoint; omit to lint every breakpoint.' },
+        variant: {
+          type: 'string',
+          description: 'Explicit branch selection as group:branch; defaults to chosen branches.',
+        },
       },
       output: {
         schema: {
@@ -912,6 +856,9 @@ export function apply(ctx: any): void {
           properties: {
             screen: { type: 'string', required: true },
             state: { type: 'string' },
+            selection: selectionSchema,
+            variant: selectionSchema,
+            media: mediaSchema,
             breakpoints: { type: 'array', required: true, items: { type: 'string' } },
             findings: {
               type: 'array',
@@ -925,8 +872,7 @@ export function apply(ctx: any): void {
         render: (_args: unknown, value: any) => {
           const header =
             'Lint ' +
-            value.screen +
-            (value.state === undefined ? '' : ' state ' + value.state) +
+            selectionLabel(value) +
             ' across ' +
             value.breakpoints.join(', ') +
             ': ' +
@@ -934,7 +880,7 @@ export function apply(ctx: any): void {
             ' error(s), ' +
             String(value.warnings) +
             ' warning(s).'
-          if (value.findings.length === 0) return text(header)
+          if (value.findings.length === 0) return text(header + formatMedia(value.media))
           return text(
             header +
               '\n' +
@@ -950,16 +896,14 @@ export function apply(ctx: any): void {
                     ': ' +
                     finding.message,
                 )
-                .join('\n'),
+                .join('\n') +
+              formatMedia(value.media),
           )
         },
       },
       async execute(args: any, exec: any) {
         const { project } = await loadForSession(ctx, exec)
-        return await runLint(checkContext(ctx, exec), project, args.screen, {
-          ...(args.state === undefined ? {} : { state: args.state }),
-          ...(args.breakpoint === undefined ? {} : { breakpoint: args.breakpoint }),
-        })
+        return await runLint(checkContext(ctx, exec), project, args.screen, args)
       },
     }),
   )
@@ -989,14 +933,19 @@ export function apply(ctx: any): void {
             state: { type: 'string' },
             breakpoint: { type: 'string', required: true },
             highlight: { type: 'string' },
-            variant: { type: 'object', additionalProperties: true, properties: {} },
+            variant: selectionSchema,
+            selection: selectionSchema,
+            media: mediaSchema,
+            attachment: selectionSchema,
+            imageDelivery: { type: 'string', required: true },
+            imageFallback: { type: 'string' },
             width: { type: 'number', required: true },
             height: { type: 'number', required: true },
             bytes: { type: 'number', required: true },
           },
         },
-        render: (_args: unknown, value: any) =>
-          text(
+        render: (_args: unknown, value: any) => {
+          const content: ToolContent[] = text(
             'Wrote ' +
               value.path +
               ' (' +
@@ -1005,17 +954,32 @@ export function apply(ctx: any): void {
               String(Math.round(value.height)) +
               ', ' +
               String(value.bytes) +
-              ' bytes). Inspect it with the image-reading tool.',
-          ),
+              ' bytes). ' +
+              selectionLabel(value) +
+              ' breakpoint=' +
+              JSON.stringify(value.breakpoint) +
+              (value.highlight === undefined ? '' : ' highlight=' + JSON.stringify(value.highlight)) +
+              (value.attachment === undefined
+                ? '\nPath-only fallback: ' +
+                  value.imageFallback +
+                  ' Open the saved PNG locally, or use read_image on an image-capable route.'
+                : '') +
+              formatMedia(value.media),
+          )
+          if (value.attachment !== undefined) content.push({ type: 'image', attachment: value.attachment })
+          return content
+        },
       },
       async execute(args: any, exec: any) {
         const { project } = await loadForSession(ctx, exec)
-        return await captureScreenshot(checkContext(ctx, exec), project, args.screen, {
-          ...(args.breakpoint === undefined ? {} : { breakpoint: args.breakpoint }),
-          ...(args.state === undefined ? {} : { state: args.state }),
-          ...(args.highlight === undefined ? {} : { highlight: args.highlight }),
-          ...(args.variant === undefined ? {} : { variant: args.variant }),
+        let image: Awaited<ReturnType<typeof screenshotAttachment>> = {
+          imageDelivery: 'path-only',
+          imageFallback: 'Image delivery is unavailable.',
+        }
+        const result = await captureScreenshot(checkContext(ctx, exec), project, args.screen, args, async (png) => {
+          image = await screenshotAttachment(ctx, exec, png)
         })
+        return { ...result, ...image }
       },
     }),
   )
@@ -1327,9 +1291,4 @@ export function apply(ctx: any): void {
       },
     }),
   )
-}
-
-/** Fallback working directory for a nested call's parent aggregation. */
-function sessionCwd(agent: any): string {
-  return agent?.session?.header?.cwd ?? process.cwd()
 }

@@ -8,6 +8,7 @@
  * sessions with no queued work, and closes browsers that arrive after a
  * cancellation or disposal.
  */
+import { createRequire } from 'node:module'
 import type { Browser, BrowserContext, Page } from 'playwright-core'
 import { deterministicDocument } from './deterministic.ts'
 import type { PreviewPayload } from './payload.ts'
@@ -45,6 +46,8 @@ export interface BrowserSessionsOptions {
   readonly launch?: () => Promise<Browser>
   /** Operator-configured Chromium executable. */
   readonly executablePath?: string
+  /** Name of the active DSH profile, when provided by the host. */
+  readonly profileName?: string
   /** Maximum number of live or launching session browsers. */
   readonly maxSessions?: number
   /** Fixed browser viewport height for every check. */
@@ -98,8 +101,32 @@ export const DEFAULT_CHECK_TIMEOUT_MS = 20000
 /** Default maximum live session browsers. */
 export const DEFAULT_MAX_SESSIONS = 4
 
-const MISSING_GUIDANCE =
-  'Headless Chromium is unavailable. Install the Playwright Chromium matching playwright-core (for example "pnpm exec playwright install chromium"), or set DSH_DESIGN_CHROMIUM_PATH to a Chromium executable. Preview and static design tools keep working without a browser.'
+/** Host configuration and the last observed sandboxed launch outcome, never a probe launch. */
+export interface BrowserReadiness {
+  readonly status: 'unverified' | 'ready' | 'failed'
+  readonly profile?: string
+  readonly host: string
+  readonly source: string
+  readonly executablePath?: string
+  readonly playwrightCli?: string
+  readonly error?: string
+  readonly guidance: string
+}
+
+const requireFromHost = createRequire(import.meta.url)
+
+function playwrightCli(): string | undefined {
+  try {
+    return requireFromHost.resolve('playwright-core/cli')
+  } catch {
+    // The installed package exports its entry point, but may not export its CLI subpath.
+    try {
+      return requireFromHost.resolve('playwright-core').replace(/[^/\\]+$/, 'cli.js')
+    } catch {
+      return undefined
+    }
+  }
+}
 
 /** Actionable guidance when the sandboxed browser cannot start. */
 export const SANDBOX_GUIDANCE =
@@ -186,6 +213,50 @@ export class BrowserSessions {
   private readonly sessionGenerations = new Map<string, number>()
   private retiring = 0
   private disposed = false
+  private launchOutcome?: { source: string; executablePath?: string; status: 'ready' | 'failed'; error?: string }
+
+  private executable() {
+    if (this.options.launch !== undefined) return { source: 'injected launcher' }
+    for (const [source, executablePath] of [
+      ['design-host chromiumPath', this.options.executablePath],
+      ['DSH_DESIGN_CHROMIUM_PATH', process.env.DSH_DESIGN_CHROMIUM_PATH],
+      ['PLAYWRIGHT_CHROMIUM_PATH', process.env.PLAYWRIGHT_CHROMIUM_PATH],
+    ] as const) {
+      if (executablePath !== undefined && executablePath !== '') return { source, executablePath }
+    }
+    return { source: 'Playwright-managed Chromium' }
+  }
+
+  /** Report the effective host/profile configuration without starting or importing Chromium. */
+  readiness(): BrowserReadiness {
+    const config = this.executable()
+    const last = this.launchOutcome
+    const observed = last?.source === config.source && last.executablePath === config.executablePath ? last : undefined
+    const profile = this.options.profileName
+    const host = process.platform + '/' + process.arch
+    const cli = config.source === 'injected launcher' ? undefined : playwrightCli()
+    const guidance =
+      'Configure Chromium on the ' +
+      (profile === undefined ? 'active DSH profile' : 'DSH ' + profile + ' profile') +
+      ' host (' +
+      host +
+      '), not in the target project. ' +
+      (cli === undefined
+        ? 'Use the Playwright CLI from the installed design host (playwright install chromium), or restore its playwright-core dependency. '
+        : 'For managed Chromium, run node ' + JSON.stringify(cli) + ' install chromium as the DSH host user. ') +
+      'Alternatively set design-host chromiumPath or DSH_DESIGN_CHROMIUM_PATH for that profile and restart the host. ' +
+      'Preview and static design tools keep working without a browser.' +
+      SANDBOX_GUIDANCE
+    return {
+      ...config,
+      ...(profile === undefined ? {} : { profile }),
+      host,
+      guidance,
+      status: observed?.status ?? 'unverified',
+      ...(cli === undefined ? {} : { playwrightCli: cli }),
+      ...(observed?.error === undefined ? {} : { error: observed.error }),
+    }
+  }
 
   constructor(options: BrowserSessionsOptions = {}) {
     this.options = options
@@ -218,43 +289,25 @@ export class BrowserSessions {
     lease.release()
   }
 
-  /** Lazily launch the configured browser. */
+  /** Lazily launch the configured browser and record only actual launch outcomes. */
   private async launch(): Promise<Browser> {
-    if (this.options.launch !== undefined) {
-      try {
-        return await this.options.launch()
-      } catch (error) {
-        throw new DesignBrowserError(
-          'chromium-missing',
-          MISSING_GUIDANCE +
-            SANDBOX_GUIDANCE +
-            ' Underlying error: ' +
-            (error instanceof Error ? error.message : String(error)),
-        )
-      }
-    }
-    let playwright: typeof import('playwright-core')
+    const selected = this.executable()
     try {
-      playwright = await import('playwright-core')
+      const browser =
+        this.options.launch === undefined
+          ? await (await import('playwright-core')).chromium.launch(chromiumLaunchOptions(selected.executablePath))
+          : await this.options.launch()
+      this.launchOutcome = { ...selected, status: 'ready' }
+      return browser
     } catch (error) {
+      const reason =
+        (error instanceof Error ? error.message : String(error)).split('\n').filter(Boolean)[0]?.slice(0, 600) ??
+        'Unknown launch error.'
+      this.launchOutcome = { ...selected, status: 'failed', error: reason }
+      const missing = /executable (?:doesn.t exist|not found)|cannot find (?:package|module)|ENOENT/i.test(reason)
       throw new DesignBrowserError(
-        'chromium-missing',
-        MISSING_GUIDANCE +
-          ' playwright-core could not be loaded: ' +
-          (error instanceof Error ? error.message : String(error)),
-      )
-    }
-    try {
-      const executablePath =
-        this.options.executablePath ?? process.env.DSH_DESIGN_CHROMIUM_PATH ?? process.env.PLAYWRIGHT_CHROMIUM_PATH
-      return await playwright.chromium.launch(chromiumLaunchOptions(executablePath))
-    } catch (error) {
-      throw new DesignBrowserError(
-        'chromium-missing',
-        MISSING_GUIDANCE +
-          SANDBOX_GUIDANCE +
-          ' Underlying error: ' +
-          (error instanceof Error ? error.message : String(error)),
+        missing ? 'chromium-missing' : 'browser-failed',
+        'Headless Chromium could not launch. ' + this.readiness().guidance + ' Underlying error: ' + reason,
       )
     }
   }
@@ -683,8 +736,13 @@ export class BrowserSessions {
           await page.goto(url, { waitUntil: 'domcontentloaded' })
           await page.waitForSelector('.dsx-frame')
           await page.waitForFunction(
-            (screen) => document.querySelector('.dsx-frame')?.getAttribute('data-screen') === screen,
-            request.screen,
+            ({ screen, breakpoint }) => {
+              const frame = document.querySelector('.dsx-frame')
+              return (
+                frame?.getAttribute('data-screen') === screen && frame.getAttribute('data-breakpoint') === breakpoint
+              )
+            },
+            { screen: request.screen, breakpoint: request.breakpoint },
             { timeout: Math.min(5000, remaining(deadline)) },
           )
           await page.evaluate(() => document.fonts.ready)

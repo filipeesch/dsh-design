@@ -381,6 +381,132 @@ describe('design handoff', () => {
   )
 
   it.skipIf(chromiumPath === undefined)(
+    'exports selected context and labeled relationships without expanding canvas or source closure',
+    async () => {
+      const h = await harness()
+      await setupProject(h.root)
+      const previewFile = join(h.root, 'design', 'preview.json')
+      const writePreview = (summary: string, outsideSummary: string) =>
+        writeFile(
+          previewFile,
+          JSON.stringify({
+            screens: {
+              checkout: { summary, details: 'Inspect the review drawer before sending.' },
+              settings: { summary: outsideSummary },
+            },
+            situations: [
+              {
+                id: 'review',
+                label: 'Review order',
+                parent: 'checkout',
+                target: { screen: 'checkout', state: 'review-open' },
+              },
+              { id: 'fallback', label: 'Alternative result', parent: 'checkout', target: { screen: 'settings' } },
+            ],
+            relationships: [
+              {
+                id: 'alternative',
+                label: 'Needs correction',
+                kind: 'simulated',
+                from: { situation: 'review' },
+                to: { situation: 'fallback' },
+              },
+              {
+                id: 'reference',
+                label: 'Related settings',
+                kind: 'illustrative',
+                from: { screen: 'checkout' },
+                to: { screen: 'settings' },
+              },
+            ],
+          }),
+        )
+      h.service.comments.create('session-test', {
+        text: 'TRANSIENT COMMENT NOT FOR EXPORT',
+        anchor: { id: 'review-drawer', type: 'Drawer', kind: 'stable', revision: 1 },
+        context: {
+          screen: 'checkout',
+          breakpoint: 'mobile',
+          state: 'review-open',
+          overlays: ['review-drawer'],
+          tabs: {},
+        },
+      })
+      await writePreview('Review the order', 'Unselected screen detail')
+      const selection = { screens: ['checkout'], states: ['review-open'], breakpoints: ['mobile'] }
+      const exportSelected = () => callTool(h, 'design_handoff', selection, h.root)
+      const first = await exportSelected()
+      expect(first).toMatchObject({
+        status: 'ok',
+        projections: 1,
+        counts: { layouts: 1, screenshots: 1, supportingScreens: 2 },
+      })
+      const manifestPath = join(h.root, first.manifest)
+      const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+      expect(manifest.context.screens).toEqual({
+        checkout: { summary: 'Review the order', details: 'Inspect the review drawer before sending.' },
+      })
+      expect(manifest.context.situations).toEqual([
+        {
+          id: 'review',
+          label: 'Review order',
+          parent: 'checkout',
+          target: { screen: 'checkout', state: 'review-open', evidence: 'selected' },
+        },
+        {
+          id: 'fallback',
+          label: 'Alternative result',
+          parent: 'checkout',
+          target: { screen: 'settings', evidence: 'outside' },
+        },
+      ])
+      expect(manifest.context.relationships).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'prototype',
+            nodeId: 'place-order',
+            label: 'Place order',
+            from: { screen: 'checkout', evidence: 'selected' },
+            to: { screen: 'confirmation', evidence: 'outside' },
+          }),
+          {
+            id: 'alternative',
+            kind: 'simulated',
+            label: 'Needs correction',
+            from: { screen: 'checkout', state: 'review-open', situation: 'review', evidence: 'selected' },
+            to: { screen: 'settings', situation: 'fallback', evidence: 'outside' },
+          },
+          {
+            id: 'reference',
+            kind: 'illustrative',
+            label: 'Related settings',
+            from: { screen: 'checkout', evidence: 'outside' },
+            to: { screen: 'settings', evidence: 'outside' },
+          },
+        ]),
+      )
+      const files = await filesBelow(join(h.root, first.package))
+      expect(files.has('preview.json')).toBe(false)
+      expect(files.has('screens/settings.dsx')).toBe(false)
+      for (const [path, contents] of files) {
+        if (!path.endsWith('.png')) expect(contents.toString()).not.toContain('TRANSIENT COMMENT NOT FOR EXPORT')
+        if (path !== 'manifest.json') expect(contents.toString()).not.toContain('Needs correction')
+      }
+      expect(await exportSelected()).toMatchObject({ id: first.id, reused: true })
+      await writePreview('Review the order', 'Outside detail changed')
+      expect(await exportSelected()).toMatchObject({ id: first.id, reused: true })
+      await writePreview('Check the order for defects', 'Outside detail changed')
+      const changed = await exportSelected()
+      expect(changed).toMatchObject({ status: 'ok', reused: false })
+      expect(changed.id).not.toBe(first.id)
+      const regenerated = JSON.parse(await readFile(join(h.root, changed.manifest), 'utf8'))
+      expect(regenerated.sourceDigest).not.toBe(manifest.sourceDigest)
+      expect(regenerated.files).toEqual(manifest.files)
+      expect(await readFile(manifestPath, 'utf8')).toContain('Review the order')
+    },
+  )
+
+  it.skipIf(chromiumPath === undefined)(
     'produces identical package bytes in a different synthetic workspace',
     async () => {
       const first = await harness()

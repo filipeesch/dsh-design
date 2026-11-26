@@ -7,7 +7,9 @@
  * stable ids, declarative interaction references, and named screen states.
  */
 import type { KitMetadata } from './metadata.ts'
-import { formatReference, isInteraction, isReference } from './refs.ts'
+import { navigationRelationships, navigationTargets } from './navigation.ts'
+import type { PreviewRelationship, PreviewScreenContext, PreviewSituation, PreviewTarget } from './preview.ts'
+import { formatReference, isReference } from './refs.ts'
 import { stateCompatibility } from './state.ts'
 import type {
   Breakpoint,
@@ -85,6 +87,21 @@ export interface HandoffJourneyPlan {
   readonly outsideScreens: readonly string[]
 }
 
+/** One relationship endpoint and whether the requested matrix renders it. */
+export interface HandoffContextTarget extends PreviewTarget {
+  readonly evidence: 'selected' | 'outside'
+}
+
+/** Descriptive evidence only; not a preview configuration or simulation control. */
+export interface HandoffContext {
+  readonly screens: Readonly<Record<string, PreviewScreenContext>>
+  readonly situations: readonly (Omit<PreviewSituation, 'target'> & { target: HandoffContextTarget })[]
+  readonly relationships: readonly (Omit<PreviewRelationship, 'from' | 'to'> & {
+    from: HandoffContextTarget
+    to: HandoffContextTarget
+  })[]
+}
+
 /** A complete, validated handoff work plan. */
 export interface HandoffPlan {
   /** Requested matrix screens. */
@@ -93,6 +110,8 @@ export interface HandoffPlan {
   readonly supportingScreens: readonly HandoffScreenPlan[]
   readonly projections: readonly HandoffProjection[]
   readonly journeys: readonly HandoffJourneyPlan[]
+  /** Durable descriptions and chosen-source relationships; never executable. */
+  readonly context?: HandoffContext
   /** Requested evidence breakpoints. */
   readonly breakpoints: readonly Breakpoint[]
   /** Every configured breakpoint, preserved in design.json support inputs. */
@@ -136,7 +155,15 @@ function validChosen(screen: ProjectScreen): boolean {
 /** One state assignment canonical form, without source locations. */
 export function canonicalState(state: NamedState | undefined): unknown {
   if (state === undefined) return null
-  return { name: state.name, open: [...state.open], tabs: { ...state.tabs }, values: { ...state.values } }
+  return {
+    name: state.name,
+    open: [...state.open],
+    tabs: { ...state.tabs },
+    values: { ...state.values },
+    ...(state.disclosures === undefined
+      ? {}
+      : { disclosures: Object.fromEntries(Object.entries(state.disclosures).sort(([a], [b]) => a.localeCompare(b))) }),
+  }
 }
 
 /** Normalize duplicate selections while preserving caller order. */
@@ -184,6 +211,9 @@ export function renderNamedStates(states: readonly NamedState[]): string {
         values[name] = Array.isArray(value) ? [...value] : (value as DesignPropValue)
       }
       fields.push('values: ' + renderDesignValue(values))
+    }
+    if (state.disclosures !== undefined && Object.keys(state.disclosures).length > 0) {
+      fields.push('disclosures: ' + renderDesignValue({ ...state.disclosures }))
     }
     return quote(state.name) + ': {' + fields.join(', ') + '}'
   })
@@ -236,29 +266,42 @@ export function handoffProjectionId(screen: string, stateName: string, breakpoin
   return [screen, stateName, breakpoint].map((part) => String(part.length) + '_' + part).join('_') // state and screen names cannot contain underscores, and lengths disambiguate every tuple
 }
 
-/** Every screen targeted by a navigate interaction, in source order. */
-export function navigationTargets(root: DesignChild | DesignScreenNode): string[] {
-  const targets: string[] = []
-  const visitValue = (value: DesignPropValue): void => {
-    if (isInteraction(value)) {
-      if (value.$interaction === 'navigate' && !targets.includes(value.target)) targets.push(value.target)
-      return
-    }
-    if (Array.isArray(value)) {
-      for (const entry of value) visitValue(entry)
-      return
-    }
-    if (value !== null && typeof value === 'object') {
-      for (const entry of Object.values(value)) visitValue(entry as DesignPropValue)
-    }
-  }
-  const visit = (node: DesignChild | DesignScreenNode): void => {
-    if (node.kind === 'text') return
-    for (const value of Object.values(node.props)) visitValue(value)
-    for (const child of node.children) visit(child)
-  }
-  visit(root)
-  return targets
+/** Project an informational neighborhood onto the requested evidence matrix. */
+function handoffContext(
+  project: DesignProject,
+  projections: readonly HandoffProjection[],
+  kit?: KitMetadata,
+): HandoffContext | undefined {
+  const selected = new Set(projections.map((projection) => projection.screen))
+  const selections = new Set(projections.map((projection) => JSON.stringify([projection.screen, projection.state])))
+  const covered = (target: PreviewTarget): boolean => selections.has(JSON.stringify([target.screen, target.state]))
+  const relevant = (target: PreviewTarget): boolean =>
+    target.situation === undefined ? selected.has(target.screen) : covered(target)
+  const evidence = (target: PreviewTarget, sourceAppliesToAllStates = false): HandoffContextTarget => ({
+    ...target,
+    evidence: (sourceAppliesToAllStates ? selected.has(target.screen) : covered(target)) ? 'selected' : 'outside',
+  })
+  const screens = Object.fromEntries(
+    Object.entries(project.preview?.screens ?? {})
+      .filter(([screen]) => selected.has(screen))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  )
+  const chosen = project.screens.flatMap((screen) =>
+    screen.root !== undefined && validChosen(screen) ? navigationRelationships(screen.root, kit) : [],
+  )
+  const relationships = [...chosen, ...(project.preview?.relationships ?? [])].flatMap((edge) => {
+    if (!relevant(edge.from) && !relevant(edge.to)) return []
+    return [{ ...edge, from: evidence(edge.from, edge.kind === 'prototype'), to: evidence(edge.to) }]
+  })
+  const referenced = new Set(relationships.flatMap((edge) => [edge.from.situation, edge.to.situation]))
+  const situations = (project.preview?.situations ?? []).flatMap((item) =>
+    covered(item.target) || selected.has(item.parent) || referenced.has(item.id)
+      ? [{ ...item, target: evidence(item.target) }]
+      : [],
+  )
+  return Object.keys(screens).length === 0 && situations.length === 0 && relationships.length === 0
+    ? undefined
+    : { screens, situations, relationships }
 }
 
 /** Build the retained screen plan, including its normalized source. */
@@ -508,7 +551,7 @@ export function resolveHandoffPlan(project: DesignProject, options: HandoffSelec
     reasons.add(reason)
   }
   for (const screen of screens) {
-    for (const target of navigationTargets(screen.root as DesignScreenNode))
+    for (const target of navigationTargets(screen.root as DesignScreenNode, options.kit))
       addSupport(target, 'navigation:' + screen.id)
   }
   for (const journey of journeys) {
@@ -518,7 +561,7 @@ export function resolveHandoffPlan(project: DesignProject, options: HandoffSelec
     const id = queue.shift() as string
     const screen = byId.get(id)
     if (screen?.root === undefined) continue
-    for (const target of navigationTargets(screen.root)) addSupport(target, 'navigation:' + id)
+    for (const target of navigationTargets(screen.root, options.kit)) addSupport(target, 'navigation:' + id)
   }
   if (screens.length + supportReasons.size > MAX_HANDOFF_SCREENS) {
     selectionError(
@@ -535,7 +578,9 @@ export function resolveHandoffPlan(project: DesignProject, options: HandoffSelec
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([id, reasons]) => screenPlan(byId.get(id) as ProjectScreen, 'supporting', [...reasons].sort()))
 
+  const context = handoffContext(project, projections, options.kit)
   return {
+    ...(context === undefined ? {} : { context }),
     screens: screens.map((screen) => screenPlan(screen, 'selected', [])),
     supportingScreens,
     projections,

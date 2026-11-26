@@ -39,6 +39,7 @@ interface HarnessState {
   open: Set<string>
   tabs: Record<string, string>
   values: Record<string, unknown>
+  disclosures: Record<string, boolean>
 }
 
 function Harness({
@@ -56,7 +57,12 @@ function Harness({
 }) {
   const parsed = validateSource(source, { screens: ['example', 'details'] })
   const root = parsed.parsed.root!
-  const [state, setState] = useState<HarnessState>({ open: new Set(initialOpen), tabs: {}, values: {} })
+  const [state, setState] = useState<HarnessState>({
+    open: new Set(initialOpen),
+    tabs: {},
+    values: {},
+    disclosures: {},
+  })
   const env: DesignEnvironment = {
     tokens: {
       'color.action': { path: 'color.action', type: 'color', value: '#2563eb', cssVar: '--dsx-color-action' },
@@ -96,6 +102,9 @@ function Harness({
     setValue: (id, value) => setState((current) => ({ ...current, values: { ...current.values, [id]: value } })),
     getTab: (id, fallback) => state.tabs[id] ?? fallback,
     setTab: (id, value) => setState((current) => ({ ...current, tabs: { ...current.tabs, [id]: value } })),
+    isDisclosureOpen: (id, fallback) => state.disclosures[id] ?? fallback,
+    setDisclosure: (id, expanded) =>
+      setState((current) => ({ ...current, disclosures: { ...current.disclosures, [id]: expanded } })),
     imageUrl: (path) => '/files/' + path,
   }
   return React.createElement(DesignEnvironmentContext.Provider, { value: env }, renderNode(root))
@@ -148,6 +157,43 @@ describe('kit rendering', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Two' }))
     expect(screen.queryByText('Panel one')).toBeNull()
     expect(screen.getByText('Panel two')).toBeTruthy()
+  })
+
+  it.each([false, true])('preserves semantic controls with compact=%s', (compact) => {
+    const option = compact ? ' compact' : ''
+    const { container } = renderDesign(
+      '<Screen id="example">' +
+        '<Tabs id="sections" label="Order details"' +
+        option +
+        '>' +
+        '<Tab id="summary" label="Summary"><Text>Order summary</Text></Tab>' +
+        '<Tab id="items" label="Items"><Text>Order items</Text></Tab></Tabs>' +
+        '<IconButton id="help" icon="info" label="Help"' +
+        option +
+        ' /></Screen>',
+    )
+    expect(screen.getByRole('tablist', { name: 'Order details' })).toBeTruthy()
+    const summary = screen.getByRole('tab', { name: 'Summary', selected: true })
+    const items = screen.getByRole('tab', { name: 'Items', selected: false })
+    expect(summary.tabIndex).toBe(0)
+    expect(items.tabIndex).toBe(-1)
+    expect(screen.getByRole('tabpanel', { name: 'Summary' }).textContent).toBe('Order summary')
+    expect(summary.style.padding).toBe(compact ? 'var(--dsx-spacing-xs, 4px) var(--dsx-spacing-sm, 8px)' : '8px 12px')
+    expect(summary.style.fontSize).toBe(compact ? '13px' : '14px')
+    const help = screen.getByRole('button', { name: 'Help' })
+    expect(help.style.padding).toBe(compact ? 'var(--dsx-spacing-xs, 4px)' : '8px')
+    expect(container.querySelector('[data-dsx-id="help"] svg')?.getAttribute('aria-hidden')).toBe('true')
+    summary.focus()
+    fireEvent.keyDown(summary, { key: 'ArrowLeft' })
+    expect(document.activeElement).toBe(items)
+    expect(items.getAttribute('aria-selected')).toBe('true')
+    const panel = screen.getByRole('tabpanel', { name: 'Items' })
+    expect(panel.id).toBe(items.getAttribute('aria-controls'))
+    expect(panel.textContent).toBe('Order items')
+    expect(screen.queryByText('Order summary')).toBeNull()
+    fireEvent.keyDown(items, { key: 'Home' })
+    expect(document.activeElement).toBe(summary)
+    expect(summary.getAttribute('aria-selected')).toBe('true')
   })
 
   it('keeps select, checkbox, switch, and input values', () => {

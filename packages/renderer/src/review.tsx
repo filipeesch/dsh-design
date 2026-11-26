@@ -776,6 +776,7 @@ export function ReviewOverlay(props: ReviewOverlayProps): ReactNode {
     if (!mode) return
     const onKeyDown = (event: KeyboardEvent): void => {
       const target = event.target
+      if (target instanceof Element && target.closest('.dsx-preview-dialog') !== null) return
       if (event.key === 'Escape') {
         event.preventDefault()
         event.stopPropagation()

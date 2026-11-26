@@ -29,7 +29,7 @@ export async function createHarness(
     folderName?: string
     effectiveCwd?: (session: any) => string | undefined
     sessionController?: any
-    assetsDir?: string
+    extraServices?: Record<string, unknown>
     chromiumPath?: string
     browserTimeoutMs?: number
   } = {},
@@ -84,7 +84,7 @@ export async function createHarness(
         return options.effectiveCwd === undefined
           ? undefined
           : { get: (session: any) => options.effectiveCwd?.(session) }
-      return undefined
+      return options.extraServices?.[name]
     },
     logger: { info() {}, warn() {}, error() {} },
     inject(_services: string[], callback: (scope: any) => void) {

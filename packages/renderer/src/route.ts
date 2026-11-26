@@ -22,6 +22,8 @@ export interface PreviewRoute {
   readonly breakpoint?: string
   /** Named screen state requested by the state query parameter. */
   readonly state?: string
+  /** Optional authored situation identity, in addition to its render selectors. */
+  readonly situation?: string
   readonly deterministic: boolean
   /** Explicit single-branch selection. */
   readonly variant?: RouteVariant
@@ -41,6 +43,8 @@ export interface PreviewRoute {
 export interface RouteUrlOptions {
   readonly breakpoint?: string
   readonly state?: string
+  /** Optional authored situation identity, in addition to its render selectors. */
+  readonly situation?: string
   readonly deterministic?: boolean
   readonly variant?: RouteVariant
   readonly compare?: RouteCompare
@@ -92,6 +96,7 @@ export function parseRoute(pathname: string, search: string): PreviewRoute {
     ...(screen === undefined || screen === '' ? {} : { screen }),
     breakpoint: params.get('bp') ?? undefined,
     state: params.get('state') ?? undefined,
+    situation: params.get('situation') ?? undefined,
     deterministic: params.get('deterministic') === '1',
     ...(variant === undefined ? {} : { variant }),
     ...(variantRaw === undefined || variantRaw === '' ? {} : { variantRaw }),
@@ -143,6 +148,7 @@ export function buildRouteUrl(screen: string | undefined, options: RouteUrlOptio
   const params = new URLSearchParams()
   if (options.breakpoint !== undefined && options.breakpoint !== '') params.set('bp', options.breakpoint)
   if (options.state !== undefined && options.state !== '') params.set('state', options.state)
+  if (options.situation !== undefined && options.situation !== '') params.set('situation', options.situation)
   if (options.variant !== undefined) {
     params.set('variant', options.variant.group + ':' + options.variant.branch)
   }
@@ -171,6 +177,7 @@ export function routeWith(screen: string | undefined, overrides: RouteUrlOptions
   return buildRouteUrl(screen ?? route.screen, {
     breakpoint: overrides.breakpoint ?? route.breakpoint,
     state: overrides.state ?? route.state,
+    situation: overrides.situation ?? route.situation,
     deterministic: overrides.deterministic ?? route.deterministic,
     ...(overrides.variant === undefined
       ? route.variant === undefined

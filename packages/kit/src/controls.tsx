@@ -1,5 +1,5 @@
 /** Form controls, buttons, and tabs. */
-import type { CSSProperties } from 'react'
+import { createContext, useContext, useLayoutEffect, useRef, type CSSProperties } from 'react'
 import type { DesignElement, DesignPropValue } from '@filipeesch/dsh-design-core'
 import { useDesign } from './context.tsx'
 import { useAct } from './interactions.ts'
@@ -76,6 +76,7 @@ export function IconButton({ node }: DesignComponentProps) {
   const label = useStringProp(node, 'label') ?? 'Button'
   const disabled = useBooleanProp(node, 'disabled') ?? false
   const variant = useStringProp(node, 'variant') ?? 'ghost'
+  const compact = useBooleanProp(node, 'compact') ?? false
   const act = useAct(node, 'onPress')
   const transition = useTransition(node)
   const iconNode: DesignElement = { ...node, type: 'Icon', props: { name: icon } }
@@ -90,7 +91,7 @@ export function IconButton({ node }: DesignComponentProps) {
       onClick={disabled ? undefined : act}
       style={{
         ...buttonColors(variant),
-        padding: 8,
+        padding: compact ? 'var(--dsx-spacing-xs, 4px)' : 8,
         borderRadius: RADIUS,
         cursor: disabled ? 'not-allowed' : 'pointer',
         display: 'inline-flex',
@@ -412,6 +413,8 @@ export function Switch({ node }: DesignComponentProps) {
   )
 }
 
+const TabPanelContext = createContext<{ node: DesignElement; labelledBy: string } | undefined>(undefined)
+
 /** Tab list and active panel. */
 export function Tabs({ node }: DesignComponentProps) {
   const env = useDesign()
@@ -422,17 +425,31 @@ export function Tabs({ node }: DesignComponentProps) {
     (first === undefined ? '' : String(stringProp(first, 'value', env) ?? first.id ?? first.address.label))
   const active = env.getTab(node.id ?? node.address.label, fallback)
   const act = useAct(node, 'onChange')
+  const label = useStringProp(node, 'label') ?? 'Tabs'
+  const compact = useBooleanProp(node, 'compact') ?? false
   const activeIndex = Math.max(
     0,
     tabs.findIndex((tab) => (tab.id ?? tab.address.label) === active || tab.props.value === active),
   )
-  const activeTab = tabs[activeIndex]
+  const focusId = (key: string) => 'dsx-tab-' + key
+  const panelId = (key: string) => 'dsx-panel-' + key
+  const select = (index: number) => {
+    const tab = tabs[index]
+    if (tab === undefined || index === activeIndex) return
+    env.setTab(node.id ?? node.address.label, tab.id ?? tab.address.label)
+    act()
+  }
   return (
     <div>
       <div
         {...nodeAttributes(node)}
         role="tablist"
-        style={{ display: 'flex', gap: 4, borderBottom: '1px solid ' + BORDER }}
+        aria-label={label}
+        style={{
+          display: 'flex',
+          gap: compact ? 'var(--dsx-spacing-xs, 4px)' : 4,
+          borderBottom: '1px solid ' + BORDER,
+        }}
       >
         {tabs.map((tab, index) => {
           const selected = index === activeIndex
@@ -442,19 +459,33 @@ export function Tabs({ node }: DesignComponentProps) {
               key={key}
               type="button"
               role="tab"
+              id={focusId(key)}
+              aria-controls={panelId(key)}
               aria-selected={selected}
+              tabIndex={selected ? 0 : -1}
               onClick={() => {
                 env.setTab(node.id ?? node.address.label, key)
                 act()
               }}
+              onKeyDown={(event) => {
+                let next: number
+                if (event.key === 'ArrowRight') next = (index + 1) % tabs.length
+                else if (event.key === 'ArrowLeft') next = (index + tabs.length - 1) % tabs.length
+                else if (event.key === 'Home') next = 0
+                else if (event.key === 'End') next = tabs.length - 1
+                else return
+                event.preventDefault()
+                event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus()
+                select(next)
+              }}
               style={{
                 ...buttonColors(selected ? 'primary' : 'ghost'),
-                padding: '8px 12px',
+                padding: compact ? 'var(--dsx-spacing-xs, 4px) var(--dsx-spacing-sm, 8px)' : '8px 12px',
                 border: 'none',
                 borderBottom: selected ? '2px solid ' + ACTION : '2px solid transparent',
                 borderRadius: 0,
                 fontFamily: FONT,
-                fontSize: 14,
+                fontSize: compact ? 13 : 14,
                 fontWeight: 600,
                 cursor: 'pointer',
               }}
@@ -464,8 +495,17 @@ export function Tabs({ node }: DesignComponentProps) {
           )
         })}
       </div>
-      <div role="tabpanel" style={{ paddingTop: 'var(--dsx-spacing-sm, 8px)' }}>
-        {activeTab === undefined ? null : env.renderNode(activeTab)}
+      <div style={{ paddingTop: compact ? 'var(--dsx-spacing-xs, 4px)' : GAP_SM }}>
+        {tabs.map((tab, index) => {
+          const key = tab.id ?? tab.address.label
+          if (index !== activeIndex)
+            return <div key={key} id={panelId(key)} role="tabpanel" aria-labelledby={focusId(key)} hidden />
+          return (
+            <TabPanelContext.Provider key={key} value={{ node: tab, labelledBy: focusId(key) }}>
+              {env.renderNode(tab)}
+            </TabPanelContext.Provider>
+          )
+        })}
       </div>
     </div>
   )
@@ -473,9 +513,84 @@ export function Tabs({ node }: DesignComponentProps) {
 
 /** One tab panel. */
 export function Tab({ node, children }: DesignComponentProps) {
+  const panel = useContext(TabPanelContext)
+  const label = useStringProp(node, 'label')
+  const nested = panel?.node === node
   return (
-    <div {...nodeAttributes(node)} role="tabpanel" aria-label={useStringProp(node, 'label')}>
+    <div
+      {...nodeAttributes(node)}
+      role="tabpanel"
+      id={nested ? 'dsx-panel-' + (node.id ?? node.address.label) : undefined}
+      aria-labelledby={nested ? panel.labelledBy : undefined}
+      aria-label={nested ? undefined : label}
+    >
       {children}
+    </div>
+  )
+}
+
+/** Labeled toggle for content on the same screen. */
+export function Disclosure({ node, children }: DesignComponentProps) {
+  const env = useDesign()
+  const id = node.id ?? node.address.label
+  const label = useStringProp(node, 'label')?.trim() || 'Details'
+  const defaultOpen = useBooleanProp(node, 'defaultOpen') ?? false
+  const expanded = env.isDisclosureOpen(id, defaultOpen)
+  const contentId = 'dsx-disclosure-content-' + id
+  const toggle = useRef<HTMLButtonElement>(null)
+  const content = useRef<HTMLDivElement>(null)
+  const focusWithin = useRef(false)
+
+  useLayoutEffect(() => {
+    if (expanded || !focusWithin.current) return
+    const document = toggle.current?.ownerDocument
+    if (document !== undefined && document.activeElement === document.body) toggle.current?.focus()
+    focusWithin.current = false
+  }, [expanded])
+
+  return (
+    <div>
+      <button
+        {...nodeAttributes(node)}
+        ref={toggle}
+        type="button"
+        role="button"
+        aria-expanded={expanded}
+        aria-controls={contentId}
+        onClick={(event) => {
+          event.currentTarget.focus()
+          env.setDisclosure(id, !expanded)
+        }}
+        style={{
+          ...buttonColors('ghost'),
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: GAP_SM,
+          padding: '8px 12px',
+          borderRadius: RADIUS,
+          fontFamily: FONT,
+          fontSize: 14,
+          fontWeight: 600,
+          cursor: 'pointer',
+        }}
+      >
+        <IconSlot node={{ ...node, props: { name: expanded ? 'chevron-down' : 'chevron-right', size: '16px' } }} />
+        {label}
+      </button>
+      <div
+        id={contentId}
+        ref={content}
+        hidden={!expanded}
+        onFocusCapture={() => {
+          focusWithin.current = true
+        }}
+        onBlurCapture={(event) => {
+          if (event.relatedTarget !== null && !content.current?.contains(event.relatedTarget))
+            focusWithin.current = false
+        }}
+      >
+        {expanded ? children : null}
+      </div>
     </div>
   )
 }

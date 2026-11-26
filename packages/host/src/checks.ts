@@ -8,7 +8,6 @@ import { rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import {
   countDiagnostics,
-  findNamedState,
   findNode,
   type DesignProject,
   type Diagnostic,
@@ -18,7 +17,12 @@ import {
 import { KIT_VERSION } from '@filipeesch/dsh-design-kit/meta'
 import { BrowserSessions, DesignBrowserError, settleFrame } from './browser.ts'
 import { cacheAreaDirectory, revalidateCacheArea } from './cache.ts'
-import { collectDeterministicAssets } from './deterministic.ts'
+import {
+  collectDeterministicAssets,
+  collectSelectedMedia,
+  diagnoseMedia,
+  type MediaDiagnostic,
+} from './deterministic.ts'
 import { buildPayload, type PreviewPayload } from './payload.ts'
 import { compatibleState, resolveScreenProjection, type ResolvedVariant } from './projection.ts'
 
@@ -62,6 +66,9 @@ export interface LintResult {
   readonly screen: string
   readonly state?: string
   readonly breakpoints: readonly string[]
+  readonly selection: Readonly<Record<string, string>>
+  readonly variant?: ResolvedVariant
+  readonly media: readonly MediaDiagnostic[]
   readonly findings: readonly LintFinding[]
   readonly errors: number
   readonly warnings: number
@@ -97,7 +104,9 @@ export interface ScreenshotResult {
   readonly state?: string
   readonly breakpoint: string
   readonly highlight?: string
+  readonly selection: Readonly<Record<string, string>>
   readonly variant?: ResolvedVariant
+  readonly media: readonly MediaDiagnostic[]
   readonly width: number
   readonly height: number
   readonly bytes: number
@@ -106,7 +115,7 @@ export interface ScreenshotResult {
 /** Services one headless check needs. */
 export interface CheckContext {
   readonly sessionId: string
-  readonly browsers: BrowserSessions
+  readonly browsers: Pick<BrowserSessions, 'run' | 'viewportHeight'>
   readonly assetsDir: string
   readonly signal?: AbortSignal
   readonly timeoutMs?: number
@@ -136,6 +145,7 @@ export function defaultBreakpoint(project: DesignProject): string {
 
 /** One projection with a renderable tree, or an explicit input error. */
 function requireProjection(project: DesignProject, id: string, variant?: string) {
+  if (variant === '') throw new Error('variant must be "group:branch".')
   const projection = resolveScreenProjection(project, id, variant)
   const screen = projection.screen
   if (screen.root === undefined) throw new Error('Screen "' + id + '" has no parsed tree; fix its diagnostics first.')
@@ -152,6 +162,91 @@ function requireProjection(project: DesignProject, id: string, variant?: string)
     )
   }
   return projection
+}
+
+/** Selection arguments shared by static inspection and browser checks. */
+export interface CheckSelectionOptions {
+  readonly state?: string
+  readonly variant?: string
+  readonly breakpoint?: string
+}
+
+/** Resolve the exact source, state and breakpoint coverage before any browser work. */
+export function resolveCheckSelection(
+  project: DesignProject,
+  screenId: string,
+  options: CheckSelectionOptions,
+  mode: 'static' | 'one' | 'all',
+) {
+  if (options.variant === '') throw new Error('variant must be "group:branch".')
+  const projection =
+    mode === 'static'
+      ? resolveScreenProjection(project, screenId, options.variant)
+      : requireProjection(project, screenId, options.variant)
+  const { screen, variant } = projection
+  if (screen.root === undefined)
+    throw new Error('Screen "' + screenId + '" has no parsed tree; fix its diagnostics first.')
+  if (mode !== 'static') {
+    const fatal = project.diagnostics.find(
+      (item) =>
+        item.severity === 'error' &&
+        (item.file === 'design.json' ||
+          item.file === 'tokens.json' ||
+          item.code === 'kit-version-mismatch' ||
+          item.code === 'project-missing'),
+    )
+    if (fatal !== undefined) throw new Error(fatal.message)
+  }
+  const named = compatibleState(screen, screen.states, options.state)
+  const names =
+    options.breakpoint !== undefined
+      ? [options.breakpoint]
+      : mode === 'all'
+        ? project.config.breakpoints.map(({ name }) => name)
+        : mode === 'one'
+          ? [defaultBreakpoint(project)]
+          : []
+  if (mode !== 'static' && names.length === 0) throw new Error('The project configures no breakpoints.')
+  const breakpoints = names.map((name) => ({ name, width: breakpointWidth(project, name) }))
+  const selection = variant?.selection ?? screen.chosenSelection ?? {}
+  return { screen, root: screen.root, variant, named, breakpoints, selection }
+}
+
+type CheckSelection = ReturnType<typeof resolveCheckSelection>
+
+/** Serialize the resolved tree, not a second independent branch resolution. */
+async function selectedRender(project: DesignProject, session: string, selected: CheckSelection, breakpoint: string) {
+  const scoped = { ...project, screens: [{ ...selected.screen, chosenSelection: selected.selection }] }
+  const media = await collectSelectedMedia(
+    project.folder,
+    selected.root,
+    selected.screen.file,
+    project.config.breakpoints,
+    breakpoint,
+  )
+  return { media, payload: payloadFromAssets(scoped, session, media.assets) }
+}
+
+/** Measure an already validated inspection selection. */
+export async function measureSelection(ctx: CheckContext, project: DesignProject, selected: CheckSelection) {
+  const breakpoint = selected.breakpoints[0]
+  if (breakpoint === undefined) throw new Error('No breakpoint was selected for measurement.')
+  const { screen, named } = selected
+  const { payload, media } = await selectedRender(project, ctx.sessionId, selected, breakpoint.name)
+  return render(
+    {
+      ctx,
+      project,
+      payload,
+      screen: screen.id,
+      breakpoint: breakpoint.name,
+      ...(named === undefined ? {} : { state: named.name }),
+    },
+    async (page) => ({
+      layout: await readSnapshot(page, screen.id, breakpoint.name, named?.name),
+      media: await diagnoseMedia(page, media),
+    }),
+  )
 }
 
 /** One project screen with a renderable chosen tree, or an explicit input error. */
@@ -334,8 +429,11 @@ interface RawFinding {
 }
 
 /** Measure overflow, clipped text, overlap, and pointer target size in the page. */
-async function lintPage(page: import('playwright-core').Page): Promise<RawFinding[]> {
-  return page.evaluate(() => {
+async function lintPage(
+  page: import('playwright-core').Page,
+  failedMediaNodes: readonly string[],
+): Promise<RawFinding[]> {
+  return page.evaluate((unavailable) => {
     const frame = document.querySelector('.dsx-frame')
     if (!(frame instanceof HTMLElement)) return []
     const round = (value: number): number => Math.round(value * 100) / 100
@@ -373,6 +471,21 @@ async function lintPage(page: import('playwright-core').Page): Promise<RawFindin
       )
     }
 
+    // Ignore only the substitute text for known failed Image/Avatar nodes. Keep
+    // their authored boxes so an oversized media box is still a layout fault.
+    const failed = new Set(unavailable)
+    for (const fallback of frame.querySelectorAll('[data-dsx-type="Image"], [data-dsx-type="Avatar"]')) {
+      if (!failed.has(label(fallback))) continue
+      if (fallback instanceof HTMLImageElement) {
+        // Chromium paints replacement text for broken native images even when
+        // they have no text nodes. This clone-only change leaves authored CSS
+        // dimensions intact and never changes a capture or the live preview.
+        fallback.alt = ''
+        fallback.removeAttribute('src')
+      } else if (fallback.getAttribute('role') === 'img') {
+        fallback.textContent = ''
+      }
+    }
     if (frame.scrollWidth > frame.clientWidth + 1) {
       push('canvas-overflow', ['canvas'], 'Canvas content is wider than the canvas.', {
         scrollWidth: round(frame.scrollWidth),
@@ -515,7 +628,7 @@ async function lintPage(page: import('playwright-core').Page): Promise<RawFindin
       }
     }
     return findings
-  })
+  }, failedMediaNodes)
 }
 
 const RULE_ORDER = [
@@ -533,21 +646,15 @@ export async function runLint(
   ctx: CheckContext,
   project: DesignProject,
   screenId: string,
-  options: { breakpoint?: string; state?: string } = {},
+  options: CheckSelectionOptions = {},
 ): Promise<LintResult> {
-  const screen = requireScreen(project, screenId)
-  const names =
-    options.breakpoint === undefined
-      ? project.config.breakpoints.map((candidate) => candidate.name)
-      : [options.breakpoint]
-  if (names.length === 0) throw new Error('The project configures no breakpoints.')
-  for (const name of names) breakpointWidth(project, name)
-  if (options.state !== undefined && !findNamedState(screen.states, options.state)) {
-    throw new Error('Screen "' + screenId + '" does not declare state "' + options.state + '".')
-  }
-  const payload = await payloadFor(project, ctx.sessionId)
+  const selected = resolveCheckSelection(project, screenId, options, 'all')
+  const { screen, variant, named, selection } = selected
+  const names = selected.breakpoints.map(({ name }) => name)
   const findings: LintFinding[] = []
+  const diagnostics: MediaDiagnostic[] = []
   for (const breakpoint of names) {
+    const { payload, media } = await selectedRender(project, ctx.sessionId, selected, breakpoint)
     const raw = await render(
       {
         ctx,
@@ -557,7 +664,14 @@ export async function runLint(
         breakpoint,
         ...(options.state === undefined ? {} : { state: options.state }),
       },
-      (page) => lintPage(page),
+      async (page) => {
+        const measuredMedia = await diagnoseMedia(page, media)
+        diagnostics.push(...measuredMedia)
+        return lintPage(
+          page,
+          measuredMedia.flatMap(({ node }) => (node === undefined ? [] : [node])),
+        )
+      },
     )
     for (const finding of raw) {
       findings.push({
@@ -572,7 +686,7 @@ export async function runLint(
     }
   }
   for (const diagnostic of screen.diagnostics) {
-    if (diagnostic.code !== 'off-token' || diagnostic.severity !== 'warning') continue
+    if (diagnostic.code !== 'off-token' || diagnostic.severity !== 'warning' || diagnostic.group !== undefined) continue
     const node = diagnostic.nodeId ?? diagnostic.address ?? 'unknown'
     findings.push({
       rule: 'off-token',
@@ -593,8 +707,11 @@ export async function runLint(
   const errors = findings.filter((finding) => finding.severity === 'error').length
   return {
     screen: screenId,
-    ...(options.state === undefined ? {} : { state: options.state }),
+    ...(named === undefined ? {} : { state: named.name }),
     breakpoints: names,
+    selection,
+    ...(variant === undefined ? {} : { variant }),
+    media: diagnostics,
     findings,
     errors,
     warnings: findings.length - errors,
@@ -680,8 +797,13 @@ export async function runJourney(ctx: CheckContext, project: DesignProject, jour
     if (step.kind === 'navigate' || step.kind === 'expect-screen') neededScreens.add(step.screen)
   }
   for (const screenId of neededScreens) requireScreen(project, screenId)
-  const breakpoint = journey.breakpoint ?? defaultBreakpoint(project)
-  breakpointWidth(project, breakpoint)
+  const selected = resolveCheckSelection(
+    project,
+    journey.start,
+    { breakpoint: journey.breakpoint, state: journey.state },
+    'one',
+  )
+  const breakpoint = selected.breakpoints[0]!.name
   const payload = await payloadFor(project, ctx.sessionId)
   const steps: JourneyStepResult[] = []
   let failure: { screen: string; snapshot: LayoutSnapshot } | undefined
@@ -906,6 +1028,7 @@ function screenshotName(
     stateOpen: named?.open ?? [],
     stateTabs: named?.tabs ?? {},
     stateValues: named?.values ?? {},
+    stateDisclosures: named?.disclosures ?? {},
     highlight: highlight ?? null,
     variant: variant === undefined ? null : variant.path + '=' + variant.branch,
   })
@@ -933,26 +1056,16 @@ export async function captureScreenshot(
   ctx: CheckContext,
   project: DesignProject,
   screenId: string,
-  options: { breakpoint?: string; state?: string; highlight?: string; variant?: string } = {},
+  options: CheckSelectionOptions & { highlight?: string } = {},
+  onPersisted?: (png: Buffer) => Promise<void>,
 ): Promise<ScreenshotResult> {
-  const projection = requireProjection(project, screenId, options.variant)
-  const screen = projection.screen
-  const breakpoint = options.breakpoint ?? defaultBreakpoint(project)
-  breakpointWidth(project, breakpoint)
-  const named = compatibleState(screen, screen.states, options.state)
-  if (
-    options.highlight !== undefined &&
-    findNode(screen.root as NonNullable<typeof screen.root>, options.highlight) === undefined
-  ) {
+  const selected = resolveCheckSelection(project, screenId, options, 'one')
+  const { screen, root, named, variant, selection } = selected
+  const breakpoint = selected.breakpoints[0]!.name
+  if (options.highlight !== undefined && findNode(root, options.highlight) === undefined) {
     throw new Error('Screen "' + screenId + '" has no node "' + options.highlight + '" to highlight.')
   }
-  const payload = await payloadFor(
-    project,
-    ctx.sessionId,
-    projection.variant === undefined
-      ? undefined
-      : { screen: screenId, group: projection.variant.path, branch: projection.variant.branch },
-  )
+  const { payload, media } = await selectedRender(project, ctx.sessionId, selected, breakpoint)
   const name = screenshotName(
     project,
     screen,
@@ -961,7 +1074,7 @@ export async function captureScreenshot(
     named,
     options.highlight,
     ctx.browsers.viewportHeight,
-    projection.variant,
+    variant,
   )
   const directory = await screenshotDirectory(project.folder)
   const path = join(directory, name)
@@ -989,7 +1102,7 @@ export async function captureScreenshot(
       const canvas = page.locator('.dsx-frame')
       const buffer = await canvas.screenshot({ type: 'png', animations: 'disabled', caret: 'hide', scale: 'css' })
       const box = await canvas.boundingBox()
-      return { buffer, box }
+      return { buffer, box, media: await diagnoseMedia(page, media) }
     },
   )
   const buffer = captured.buffer
@@ -1004,13 +1117,16 @@ export async function captureScreenshot(
     await rm(temporary, { force: true }).catch(() => undefined)
     throw error
   }
+  await onPersisted?.(buffer)
   return {
     path,
     screen: screenId,
+    selection,
     ...(options.state === undefined ? {} : { state: options.state }),
     breakpoint,
     ...(options.highlight === undefined ? {} : { highlight: options.highlight }),
-    ...(projection.variant === undefined ? {} : { variant: projection.variant }),
+    ...(variant === undefined ? {} : { variant }),
+    media: captured.media,
     width: captured.box?.width ?? breakpointWidth(project, breakpoint),
     height: captured.box?.height ?? 0,
     bytes: buffer.length,

@@ -1,8 +1,17 @@
-<Screen id="checkout" title="Checkout" states={{ "review-open": { open: ["review-drawer"], values: { email: "ada@example.com", plan: "pro" } } }}>
+<Screen id="checkout" title="Checkout" states={{ "review-open": { open: ["review-drawer"], values: { email: "ada@example.com", plan: "pro" } }, "prices-open": { disclosures: { "price-details": true } } }}>
   <Header title="Checkout" subtitle="Fictitious sandbox checkout" />
   <Stack gap="spacing.md" padding="spacing.lg" background="color.canvas">
     <Input id="email" label="Email" placeholder="you@example.com" type="email" />
     <Select id="plan" label="Delivery plan" options={fixture("plans")} />
+    <Disclosure id="price-details" label="Price details" defaultOpen={false}>
+      <Card id="price-breakdown" padding="spacing.md" variant="outlined" background="color.surface">
+        <Stack gap="spacing.sm">
+          <Text>Sample items: $38.00</Text>
+          <Text>Delivery: $4.00</Text>
+          <Text variant="heading">Sample total: $42.00</Text>
+        </Stack>
+      </Card>
+    </Disclosure>
     <Button id="place-order" variant="primary" size="lg" onPress={navigate("confirmation")}>Place order</Button>
   </Stack>
   <Drawer id="review-drawer" title="Order review" side="right">

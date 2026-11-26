@@ -1,0 +1,7 @@
+<Journey id="document-submit" start="document" breakpoint="mobile">
+  <Tap target="submit-document" />
+  <ExpectScreen screen="review" />
+  <ExpectVisible target="pending-message" visible={true} />
+  <ExpectVisible target="approved-message" visible={false} />
+  <ExpectVisible target="correction-message" visible={false} />
+</Journey>

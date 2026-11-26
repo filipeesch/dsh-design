@@ -11,6 +11,7 @@ import { readFile, realpath } from 'node:fs/promises'
 import { resolve, sep } from 'node:path'
 import {
   canonicalState,
+  PREVIEW_METADATA_FILE,
   countDiagnostics,
   extractNamedStates,
   fingerprintDesignTree,
@@ -136,6 +137,9 @@ breakpoints, and lists every artifact with its size and SHA-256 digest.
 - \`screenshots/*.png\` is the matching canvas image for each layout.
 - \`journeys/*.dsx\` holds relevant acceptance flows. The manifest marks any
   screen a journey needs outside this package.
+- The manifest's context, when present, describes the selected evidence and nearby
+  relationships. Outside endpoints are not additional renders. Illustrative and
+  simulated edges are documentation, not executable controls.
 - Local raster assets are copied at the same relative paths the DSX references.
 
 Consume the package with ordinary file access. Do not call handoff from an
@@ -171,6 +175,7 @@ function reservedAssetPath(path: string): boolean {
     path === 'README.md' ||
     path === 'design.json' ||
     path === 'tokens.json' ||
+    path === PREVIEW_METADATA_FILE ||
     path === 'tokens.resolved.json' ||
     path.startsWith('screens/') ||
     path.startsWith('journeys/') ||
@@ -536,6 +541,7 @@ export async function runHandoff(input: HandoffInput): Promise<HandoffResult> {
         .map(([path, source]) => [path, sha256Bytes(source)]),
       assets: assetPaths.map((path) => [path, sha256Bytes(files[path] as Buffer)]),
       selection: input.plan.projections.map((projection) => projection.id),
+      ...(input.plan.context === undefined ? {} : { context: input.plan.context }),
     }),
   )
 
@@ -552,6 +558,7 @@ export async function runHandoff(input: HandoffInput): Promise<HandoffResult> {
   const manifestBase = {
     format: HANDOFF_FORMAT,
     sourceDigest,
+    ...(input.plan.context === undefined ? {} : { context: input.plan.context }),
     kit: { pin: input.project.config.kitVersion, installed: KIT_VERSION },
     renderer: {
       pipeline: 'deterministic-preview',

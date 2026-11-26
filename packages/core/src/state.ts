@@ -1,6 +1,6 @@
 /**
  * Named initial screen state: a reserved `states` prop on Screen that maps
- * kebab-case names to overlay/tab/field assignments by stable node id.
+ * kebab-case names to overlay, tab, field, and disclosure assignments by stable node id.
  *
  * The prop is validated against the expanded tree and removed from the
  * renderable tree. Only validated metadata travels with the screen.
@@ -8,8 +8,10 @@
 import type { KitMetadata } from './metadata.ts'
 import { isReference } from './refs.ts'
 import type {
+  Breakpoint,
   DesignChild,
   DesignElement,
+  DesignPropValue,
   DesignProps,
   DesignScreenNode,
   DesignStateValue,
@@ -102,21 +104,21 @@ function readState(
       root,
       source,
       'state-shape',
-      `State "${name}" must be an object with optional open, tabs, and values.`,
+      `State "${name}" must be an object with optional open, tabs, values, and disclosures.`,
     )
     return undefined
   }
   const record = raw as Record<string, unknown>
   let valid = true
   for (const key of Object.keys(record)) {
-    if (key !== 'open' && key !== 'tabs' && key !== 'values') {
+    if (key !== 'open' && key !== 'tabs' && key !== 'values' && key !== 'disclosures') {
       pushState(
         diagnostics,
         root,
         source,
         'state-key',
         `State "${name}" declares unsupported field "${key}".`,
-        'Use open, tabs, or values.',
+        'Use open, tabs, values, or disclosures.',
       )
       valid = false
     }
@@ -383,8 +385,73 @@ function readState(
     }
   }
 
+  const disclosures: Record<string, boolean> = Object.create(null) as Record<string, boolean>
+  const rawDisclosures = record.disclosures
+  if (rawDisclosures !== undefined) {
+    if (
+      rawDisclosures === null ||
+      typeof rawDisclosures !== 'object' ||
+      Array.isArray(rawDisclosures) ||
+      isReference(rawDisclosures)
+    ) {
+      pushState(
+        diagnostics,
+        root,
+        source,
+        'state-disclosures-shape',
+        `State "${name}" field "disclosures" must map Disclosure ids to boolean expansion values.`,
+      )
+      valid = false
+    } else {
+      const entries = Object.entries(rawDisclosures)
+      if (entries.length > MAX_STATE_ENTRIES) {
+        pushState(
+          diagnostics,
+          root,
+          source,
+          'state-disclosures-shape',
+          `State "${name}" declares more than ${String(MAX_STATE_ENTRIES)} disclosure assignments.`,
+        )
+        valid = false
+      }
+      for (const [id, expanded] of entries.slice(0, MAX_STATE_ENTRIES)) {
+        const target = nodes.get(id)
+        if (target === undefined) {
+          pushState(
+            diagnostics,
+            root,
+            source,
+            'state-disclosure-missing',
+            `State "${name}" seeds disclosure "${id}", which does not exist in this screen.`,
+          )
+          valid = false
+        } else if (target.type !== 'Disclosure') {
+          pushState(
+            diagnostics,
+            root,
+            source,
+            'state-disclosure-target',
+            `State "${name}" seeds <${target.type}> "${id}", which is not a Disclosure.`,
+          )
+          valid = false
+        } else if (typeof expanded !== 'boolean') {
+          pushState(
+            diagnostics,
+            root,
+            source,
+            'state-disclosure-value',
+            `State "${name}" disclosure assignment for "${id}" must be true or false.`,
+          )
+          valid = false
+        } else {
+          disclosures[id] = expanded
+        }
+      }
+    }
+  }
+
   if (!valid) return undefined
-  return { name, open, tabs, values, source }
+  return { name, open, tabs, values, ...(Object.keys(disclosures).length === 0 ? {} : { disclosures }), source }
 }
 
 /**
@@ -503,7 +570,37 @@ export function stateCompatibility(root: DesignScreenNode, named: NamedState, ki
     }
     issues.push('assigns a value to <' + type + '> "' + id + '", which does not accept a seeded value')
   }
+  for (const [id, expanded] of Object.entries(named.disclosures ?? {})) {
+    const target = nodes.get(id)
+    if (target === undefined) issues.push('seeds disclosure "' + id + '", which this projection does not render')
+    else if (target.type !== 'Disclosure')
+      issues.push('seeds "' + id + '", which is not a Disclosure in this projection')
+    else if (typeof expanded !== 'boolean') issues.push('assigns a non-boolean expansion to "' + id + '"')
+  }
   return issues
+}
+
+/** Pick the responsive value that applies at the active breakpoint. */
+export function resolveResponsive(
+  value: DesignPropValue | undefined,
+  breakpoints: readonly Breakpoint[],
+  activeBreakpoint: string,
+): DesignPropValue | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || '$interaction' in value) return value
+  const object = value as Record<string, DesignPropValue>
+  const ordered = [...breakpoints].sort((left, right) => left.width - right.width)
+  const active = ordered.find((breakpoint) => breakpoint.name === activeBreakpoint)
+  if (active === undefined) return value
+  let chosen: DesignPropValue | undefined
+  for (const breakpoint of ordered) {
+    if (breakpoint.width > active.width) break
+    if (object[breakpoint.name] !== undefined) chosen = object[breakpoint.name]
+  }
+  if (chosen === undefined) {
+    const first = ordered.find((breakpoint) => object[breakpoint.name] !== undefined)
+    chosen = first === undefined ? undefined : object[first.name]
+  }
+  return chosen
 }
 
 /** Find one named state in a screen's metadata. */

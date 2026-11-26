@@ -5,6 +5,8 @@ import type {
   DesignScreenNode,
   Diagnostic,
   NamedState,
+  PreviewMetadata,
+  PreviewRelationship,
   ResolvedToken,
 } from '@filipeesch/dsh-design-core'
 
@@ -80,6 +82,8 @@ export interface ProjectPayload {
   readonly cssVariables: Readonly<Record<string, string>>
   readonly diagnostics: readonly Diagnostic[]
   readonly screens: readonly WireScreen[]
+  readonly preview?: PreviewMetadata
+  readonly relationships?: readonly PreviewRelationship[]
   /** Project-level fatal message, for example a kit version mismatch. */
   readonly projectError?: string
   /** Inline data URIs used by the self-contained deterministic document. */

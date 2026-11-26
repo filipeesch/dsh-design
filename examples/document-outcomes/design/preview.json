@@ -1,0 +1,82 @@
+{
+  "screens": {
+    "document": {
+      "summary": "Read the draft and submit it for editorial review.",
+      "details": "Review the draft, waiting screen, and two possible outcomes. The sample document is fictitious; submission never uploads anything."
+    },
+    "review": {
+      "summary": "Compare the waiting state with approval and correction outcomes.",
+      "details": "The prototype has no review service. The preview offers two manual outcomes only while viewing Awaiting review."
+    }
+  },
+  "groups": [
+    {
+      "id": "editorial",
+      "label": "Editorial workflow",
+      "screens": ["document", "review"]
+    }
+  ],
+  "situations": [
+    {
+      "id": "awaiting-review",
+      "label": "Awaiting review",
+      "parent": "document",
+      "target": {
+        "screen": "review"
+      }
+    },
+    {
+      "id": "document-approved",
+      "label": "Document approved",
+      "parent": "review",
+      "target": {
+        "screen": "review",
+        "state": "approved"
+      }
+    },
+    {
+      "id": "correction-requested",
+      "label": "Correction requested",
+      "parent": "review",
+      "target": {
+        "screen": "review",
+        "state": "needs-correction"
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "id": "simulate-approval",
+      "label": "Approval",
+      "kind": "simulated",
+      "from": {
+        "screen": "review"
+      },
+      "to": {
+        "situation": "document-approved"
+      }
+    },
+    {
+      "id": "simulate-correction",
+      "label": "Correction request",
+      "kind": "simulated",
+      "from": {
+        "screen": "review"
+      },
+      "to": {
+        "situation": "correction-requested"
+      }
+    },
+    {
+      "id": "describe-resubmission",
+      "label": "Revise and resubmit",
+      "kind": "illustrative",
+      "from": {
+        "situation": "correction-requested"
+      },
+      "to": {
+        "screen": "document"
+      }
+    }
+  ]
+}

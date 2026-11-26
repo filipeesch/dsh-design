@@ -1,6 +1,7 @@
 /** Compact text projection of a design screen for the `design_view` tool. */
 import { formatReference, isReference } from './refs.ts'
-import type { DesignChild, DesignElement, DesignPropValue, DesignScreenNode } from './types.ts'
+import { resolveResponsive } from './state.ts'
+import type { Breakpoint, DesignChild, DesignElement, DesignPropValue, DesignScreenNode } from './types.ts'
 
 /** Options for the text projection. */
 export interface ViewOptions {
@@ -12,6 +13,10 @@ export interface ViewOptions {
   readonly openOverlays?: boolean
   /** Overlay ids to expand, for example a selected named state. */
   readonly openIds?: readonly string[]
+  /** Authored expansion seeds for Disclosure ids. */
+  readonly disclosures?: Readonly<Record<string, boolean>>
+  readonly breakpoints?: readonly Breakpoint[]
+  readonly breakpoint?: string
 }
 
 /** Result of a projection. */
@@ -63,7 +68,7 @@ function elementLine(
     .filter((child): child is Extract<DesignChild, { kind: 'text' }> => child.kind === 'text')
     .map((child) => (child.itemField === undefined ? child.value : 'item("' + child.itemField + '")'))
     .join(' ')
-  const suffix = text.length === 0 ? '' : ` "${text}"`
+  const suffix = text.length === 0 || (closed && node.type === 'Disclosure') ? '' : ` "${text}"`
   const marker = closed ? ' (closed)' : truncated ? ' …' : ''
   return `${indent}<${node.type} ${identity}${props}>${suffix}${marker}`
 }
@@ -83,16 +88,20 @@ export function projectScreen(root: DesignElement | DesignScreenNode, options: V
   }
   const maxDepth = options.depth ?? 40
   const requested = options.node !== undefined
+  const breakpoints = options.breakpoints ?? []
+  const breakpoint = options.breakpoint ?? [...breakpoints].sort((a, b) => b.width - a.width)[0]?.name ?? ''
   const lines: string[] = []
 
   const visit = (node: DesignChild | DesignScreenNode, depth: number, forceOpen: boolean): void => {
     if (node.kind === 'text') return
-    const isOverlay = OVERLAY_TYPES.has(node.type)
+    const seed = node.id === undefined ? undefined : options.disclosures?.[node.id]
     const closed =
-      isOverlay &&
-      !options.openOverlays &&
       !forceOpen &&
-      !(node.id !== undefined && (options.openIds ?? []).includes(node.id))
+      (node.type === 'Disclosure'
+        ? !(seed ?? resolveResponsive(node.props.defaultOpen, breakpoints, breakpoint) === true)
+        : OVERLAY_TYPES.has(node.type) &&
+          !options.openOverlays &&
+          !(node.id !== undefined && (options.openIds ?? []).includes(node.id)))
     const truncated = depth >= maxDepth && node.children.some((child) => child.kind === 'element')
     lines.push(elementLine(node, depth, closed, truncated))
     if (closed || truncated) return

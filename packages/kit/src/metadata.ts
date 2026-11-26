@@ -56,6 +56,8 @@ const fontFamily: PropMeta = {
 /** Components that accept the standard surface styling props. */
 const surfaceProps: PropMeta[] = [padding, background, radius, shadow, borderColor]
 
+const compact: PropMeta = { name: 'compact', kind: 'boolean', default: false, description: 'Use tighter spacing.' }
+
 /** One component entry. */
 function component(
   name: string,
@@ -290,6 +292,7 @@ const definitions: ComponentMeta[] = [
       },
       { name: 'disabled', kind: 'boolean', description: 'Disable the button.' },
       { name: 'onPress', kind: 'event', description: 'Interaction reference.' },
+      compact,
     ],
     example: '<IconButton id="close-panel" icon="close" label="Close" />',
   }),
@@ -381,6 +384,8 @@ const definitions: ComponentMeta[] = [
     role: 'tablist',
     props: [
       { name: 'value', kind: 'string', description: 'Initially active tab value.' },
+      { name: 'label', kind: 'string', default: 'Tabs', description: 'Accessible name for the tab list.' },
+      compact,
       { name: 'onChange', kind: 'event', description: 'Interaction reference fired on change.' },
     ],
     example:
@@ -396,6 +401,17 @@ const definitions: ComponentMeta[] = [
       { name: 'value', kind: 'string', description: 'Stable tab value.' },
     ],
     example: '<Tab id="tab-overview" label="Overview" value="overview">\n  <Text>Panel</Text>\n</Tab>',
+  }),
+  component('Disclosure', 'Labeled toggle that reveals its own content inline.', 'layout', 1, {
+    requiredId: true,
+    interactive: true,
+    children: 'any',
+    role: 'button',
+    props: [
+      { name: 'label', kind: 'string', required: true, description: 'Visible and accessible label for the toggle.' },
+      { name: 'defaultOpen', kind: 'boolean', default: false, description: 'Start with the content expanded.' },
+    ],
+    example: '<Disclosure id="price-details" label="Price details"><Text>Totals include tax.</Text></Disclosure>',
   }),
   component('Card', 'Surface container for grouped content.', 'layout', 1, {
     children: 'any',

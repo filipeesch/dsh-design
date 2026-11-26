@@ -138,7 +138,7 @@ describe('variant preview routes', () => {
     expect(await screen.findByText('Spacious only')).toBeTruthy()
     expect(document.querySelector('.dsx-shell')?.getAttribute('data-dsx-variant')).toBe('layout:spacious')
     expect(screen.getByText(/layout · spacious/)).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: /desktop/ }))
+    fireEvent.change(screen.getByLabelText('Breakpoint'), { target: { value: 'desktop' } })
     await waitFor(() => expect(new URL(window.location.href).searchParams.get('bp')).toBe('desktop'))
     const params = new URL(window.location.href).searchParams
     expect(params.get('variant')).toBe('layout:spacious')

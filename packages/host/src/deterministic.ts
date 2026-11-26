@@ -2,9 +2,21 @@
 import { readFile, realpath, stat } from 'node:fs/promises'
 import { extname, resolve, sep } from 'node:path'
 import { randomBytes } from 'node:crypto'
-import type { DesignChild, DesignProject, DesignScreenNode } from '@filipeesch/dsh-design-core'
+import {
+  resolveResponsive,
+  type Breakpoint,
+  type DesignChild,
+  type DesignProject,
+  type DesignScreenNode,
+} from '@filipeesch/dsh-design-core'
 import type { PreviewPayload } from './payload.ts'
-import { MAX_DETERMINISTIC_FILE_BYTES, MAX_DETERMINISTIC_MEDIA_BYTES, RASTER_TYPES, rasterDataUri } from './media.ts'
+import {
+  MAX_DETERMINISTIC_FILE_BYTES,
+  MAX_DETERMINISTIC_MEDIA_BYTES,
+  RASTER_TYPES,
+  rasterDataUri,
+  sniffRaster,
+} from './media.ts'
 
 const URL_PATTERN = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi
 
@@ -33,6 +45,15 @@ function collectPaths(node: DesignChild | undefined, paths: Set<string>): void {
       if (asset !== undefined) paths.add(asset)
     }
   }
+  // Responsive src values may be chosen by the renderer later (e.g. in a journey).
+  const src = node.props.src
+  if ((node.type === 'Image' || node.type === 'Avatar') && src !== null && typeof src === 'object') {
+    for (const value of Object.values(src)) {
+      if (typeof value !== 'string' || value.startsWith('placeholder:')) continue
+      const path = assetPath(value)
+      if (path !== undefined) paths.add(path)
+    }
+  }
   for (const child of node.children) collectPaths(child, paths)
 }
 
@@ -43,29 +64,177 @@ export function referencedAssetPaths(roots: readonly (DesignChild | DesignScreen
   return [...paths].sort((left, right) => left.localeCompare(right))
 }
 
+type MediaFailure = 'missing' | 'unsupported' | 'undecodable'
+
+/** Source-linked media availability, independent of measured geometry. */
+export interface MediaDiagnostic {
+  readonly code: MediaFailure
+  readonly breakpoint: string
+  readonly file: string
+  readonly line: number
+  readonly column: number
+  readonly node?: string
+  readonly reference: string
+  readonly remediation: string
+}
+
+interface MediaReference {
+  readonly file: string
+  readonly line: number
+  readonly column: number
+  readonly node?: string
+  readonly reference: string
+}
+
+async function readRasterAssets(folder: string, paths: readonly string[]) {
+  const root = await realpath(folder).catch(() => undefined)
+  const assets: Record<string, string> = {}
+  const failures = new Map<string, MediaFailure>()
+  let total = 0
+  for (const path of paths) {
+    const real = root === undefined ? undefined : await realpath(resolve(root, path)).catch(() => undefined)
+    if (real === undefined) {
+      failures.set(path, 'missing')
+      continue
+    }
+    if (real === root || !real.startsWith(root + sep)) {
+      failures.set(path, 'unsupported')
+      continue
+    }
+    const info = await stat(real).catch(() => undefined)
+    if (info === undefined) {
+      failures.set(path, 'missing')
+      continue
+    }
+    if (
+      !info.isFile() ||
+      info.size > MAX_DETERMINISTIC_FILE_BYTES ||
+      total + info.size > MAX_DETERMINISTIC_MEDIA_BYTES
+    ) {
+      failures.set(path, 'unsupported')
+      continue
+    }
+    const buffer = await readFile(real).catch(() => undefined)
+    if (buffer === undefined || sniffRaster(buffer) === undefined) {
+      failures.set(path, 'undecodable')
+      continue
+    }
+    if (RASTER_TYPES[extname(path).toLowerCase()] !== sniffRaster(buffer)) {
+      failures.set(path, 'unsupported')
+      continue
+    }
+    const data = rasterDataUri(buffer)
+    if (data === undefined) {
+      failures.set(path, 'undecodable')
+      continue
+    }
+    assets[path] = data
+    total += buffer.length
+  }
+  return { assets, failures }
+}
+
 /** Inline bounded, validated local raster bytes referenced by selected roots. */
 export async function collectAssetsForRoots(
   folder: string,
   roots: readonly (DesignChild | DesignScreenNode | undefined)[],
 ): Promise<Record<string, string>> {
-  const root = await realpath(folder).catch(() => undefined)
-  if (root === undefined) return {}
-  const assets: Record<string, string> = {}
-  let total = 0
-  for (const path of referencedAssetPaths(roots)) {
-    const target = resolve(root, path)
-    const real = await realpath(target).catch(() => undefined)
-    if (real === undefined || (real !== root && !real.startsWith(root + sep))) continue
-    const info = await stat(real).catch(() => undefined)
-    if (info === undefined || !info.isFile() || info.size === 0 || info.size > MAX_DETERMINISTIC_FILE_BYTES) continue
-    if (total + info.size > MAX_DETERMINISTIC_MEDIA_BYTES) continue
-    const buffer = await readFile(real)
-    const data = rasterDataUri(buffer)
-    if (data === undefined) continue
-    assets[path] = data
-    total += buffer.length
+  return (await readRasterAssets(folder, referencedAssetPaths(roots))).assets
+}
+
+/** Media used by the resolved tree, even where missing media produces only fallback text. */
+export async function collectSelectedMedia(
+  folder: string,
+  root: DesignScreenNode,
+  file: string,
+  breakpoints: readonly Breakpoint[],
+  breakpoint: string,
+) {
+  const references: MediaReference[] = []
+  function visit(node: DesignChild): void {
+    if (node.kind !== 'element') return
+    const identity = node.id ?? node.address?.label
+    const remember = (value: string): void => {
+      if (value.startsWith('placeholder:')) return
+      const reference = value.trim().replace(/^\.\//, '')
+      // Do not echo forbidden absolute paths, traversals, or external URLs.
+      const local =
+        reference !== '' &&
+        !reference.startsWith('/') &&
+        !reference.includes('\\') &&
+        !/^[a-z][a-z0-9+.-]*:/i.test(reference) &&
+        !reference.split('/').some((part) => part === '..' || part === '.cache')
+      references.push({
+        file,
+        line: node.source.line,
+        column: node.source.column,
+        ...(identity === undefined ? {} : { node: identity }),
+        reference: local ? reference : '(invalid local path)',
+      })
+    }
+    if (node.type === 'Image' || node.type === 'Avatar') {
+      const source = resolveResponsive(node.props.src, breakpoints, breakpoint)
+      if (typeof source === 'string') remember(source)
+    }
+    if (typeof node.props.css === 'string') {
+      for (const match of node.props.css.matchAll(URL_PATTERN)) remember(match[1] ?? match[2] ?? match[3] ?? '')
+    }
+    for (const child of node.children) visit(child)
   }
-  return assets
+  visit(root)
+  const paths = new Set(
+    references.flatMap(({ reference }) => {
+      const path = assetPath(reference)
+      return path === undefined ? [] : [path]
+    }),
+  )
+  const { assets, failures } = await readRasterAssets(
+    folder,
+    [...paths].sort((left, right) => left.localeCompare(right)),
+  )
+  return { assets, references, failures, breakpoint }
+}
+
+type SelectedMedia = Awaited<ReturnType<typeof collectSelectedMedia>>
+
+/** Confirm actual browser decoding of passive, already inlined data only. */
+export async function diagnoseMedia(
+  page: import('playwright-core').Page,
+  media: SelectedMedia,
+): Promise<MediaDiagnostic[]> {
+  const known = [...new Set(media.references.map(({ reference }) => reference))]
+  const inlined = known.flatMap((path) =>
+    media.assets[path] === undefined ? [] : [{ path, data: media.assets[path] }],
+  )
+  const invalid = new Set(
+    inlined.length === 0
+      ? []
+      : await page.evaluate(async (items) => {
+          const failed = await Promise.all(
+            items.map(async ({ path, data }) => {
+              const image = document.createElement('img')
+              image.src = data
+              return image.decode().then(
+                () => undefined,
+                () => path,
+              )
+            }),
+          )
+          return failed.filter((path): path is string => path !== undefined)
+        }, inlined),
+  )
+  return media.references.flatMap((entry) => {
+    const path = assetPath(entry.reference)
+    const code = path === undefined ? 'unsupported' : invalid.has(path) ? 'undecodable' : media.failures.get(path)
+    if (code === undefined) return []
+    const remediation =
+      code === 'missing'
+        ? 'Add the file inside the design folder or correct its relative path.'
+        : code === 'undecodable'
+          ? 'Re-export the file as a valid PNG, JPEG, WebP or GIF.'
+          : 'Use a local PNG, JPEG, WebP or GIF within the deterministic media limits (2 MiB/file, 8 MiB total).'
+    return [{ ...entry, code, breakpoint: media.breakpoint, remediation }]
+  })
 }
 
 /** Inline bounded, validated local raster bytes referenced by the project. */

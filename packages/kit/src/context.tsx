@@ -24,6 +24,8 @@ export interface DesignEnvironment {
   setValue: (id: string, value: unknown) => void
   getTab: (id: string, fallback: string) => string
   setTab: (id: string, value: string) => void
+  isDisclosureOpen: (id: string, fallback: boolean) => boolean
+  setDisclosure: (id: string, expanded: boolean) => void
   /** Resolve a design-folder image path into a preview URL. */
   imageUrl: (path: string) => string
 }
@@ -49,6 +51,8 @@ const fallbackEnvironment: DesignEnvironment = {
   setValue: () => undefined,
   getTab: (_id, fallback) => fallback,
   setTab: () => undefined,
+  isDisclosureOpen: (_id, fallback) => fallback,
+  setDisclosure: () => undefined,
   imageUrl: (path) => path,
 }
 
