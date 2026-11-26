@@ -4,6 +4,15 @@ The **Stable plugin release** workflow ([release.yml](../.github/workflows/relea
 publishes the prebuilt bundle and its SHA-256 checksum as GitHub Release assets.
 Users install from the stable download URL in the [install guide](../README.md#install).
 
+## Before merging
+
+[Pull request CI](../.github/workflows/pr-check.yml) runs `pnpm run check` on
+GitHub's proposed merge commit for PRs targeting `main`. It uses a read-only
+token and does not create tags or releases. Wait for **PR build and tests**
+to pass before merging. To enforce this, configure it as a required status
+check for `main` and require PR branches to be up to date before merge.
+The release workflow still checks the exact merged commit separately.
+
 ## What triggers a release
 
 - The workflow listens for `pull_request_target` events of type `closed` and
