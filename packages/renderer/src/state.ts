@@ -1,5 +1,5 @@
 /** Preview interaction state keyed by screen and node id. */
-import type { NamedState } from '@filipeesch/dsh-design-core'
+import type { DesignChild, DesignScreenNode, NamedState } from '@filipeesch/dsh-design-core'
 import type { ProjectPayload } from './wire.ts'
 import { collectIds } from './wire.ts'
 
@@ -8,13 +8,14 @@ export interface PreviewState {
   openOverlays: Record<string, true>
   tabs: Record<string, string>
   values: Record<string, unknown>
+  disclosures: Record<string, boolean>
 }
 
 const KEY_PREFIX = 'dsh-design:state:'
 
 /** Empty initial state. */
 export function emptyState(): PreviewState {
-  return { openOverlays: {}, tabs: {}, values: {} }
+  return { openOverlays: {}, tabs: {}, values: {}, disclosures: {} }
 }
 
 /** Load state for a session from session storage. */
@@ -29,6 +30,10 @@ export function loadState(session: string, fallback: PreviewState = emptyState()
           ? (parsed.openOverlays as Record<string, true>)
           : {},
       tabs: parsed.tabs !== null && typeof parsed.tabs === 'object' ? (parsed.tabs as Record<string, string>) : {},
+      disclosures:
+        parsed.disclosures !== null && typeof parsed.disclosures === 'object' && !Array.isArray(parsed.disclosures)
+          ? Object.fromEntries(Object.entries(parsed.disclosures).filter(([, value]) => typeof value === 'boolean'))
+          : {},
       values:
         parsed.values !== null && typeof parsed.values === 'object' ? (parsed.values as Record<string, unknown>) : {},
     }
@@ -50,7 +55,17 @@ export function saveState(session: string, state: PreviewState): void {
 export function filterState(state: PreviewState, project: ProjectPayload): PreviewState {
   const ids = new Set<string>()
   const radios = new Set<string>()
-  for (const screen of project.screens) collectIds(screen.lastValidRoot ?? screen.root, ids, radios)
+  const disclosures = new Set<string>()
+  const collectDisclosures = (node: DesignChild | DesignScreenNode | undefined, prefix: string): void => {
+    if (node === undefined || node.kind === 'text') return
+    if (node.type === 'Disclosure' && node.id !== undefined) disclosures.add(prefix + node.id)
+    for (const child of node.children) collectDisclosures(child, prefix)
+  }
+  for (const screen of project.screens) {
+    const root = screen.lastValidRoot ?? screen.root
+    collectIds(root, ids, radios)
+    collectDisclosures(root, screen.id + '/')
+  }
   const keep = (key: string): boolean => {
     const slash = key.indexOf('/')
     if (slash === -1) return false
@@ -67,6 +82,7 @@ export function filterState(state: PreviewState, project: ProjectPayload): Previ
     openOverlays: pick(state.openOverlays),
     tabs: pick(state.tabs),
     values: pick(state.values),
+    disclosures: Object.fromEntries(Object.entries(state.disclosures).filter(([key]) => disclosures.has(key))),
   }
 }
 /**
@@ -75,22 +91,12 @@ export function filterState(state: PreviewState, project: ProjectPayload): Previ
  */
 export function seedState(state: PreviewState, screen: string, named: NamedState): PreviewState {
   const prefix = screen + '/'
-  const openOverlays: Record<string, true> = {}
-  for (const [key, value] of Object.entries(state.openOverlays)) {
-    if (!key.startsWith(prefix)) openOverlays[key] = value
-  }
-  for (const id of named.open) openOverlays[prefix + id] = true
-  const tabs: Record<string, string> = {}
-  for (const [key, value] of Object.entries(state.tabs)) {
-    if (!key.startsWith(prefix)) tabs[key] = value
-  }
-  for (const [id, value] of Object.entries(named.tabs)) tabs[prefix + id] = value
-  const values: Record<string, unknown> = {}
-  for (const [key, value] of Object.entries(state.values)) {
-    if (!key.startsWith(prefix)) values[key] = value
-  }
-  for (const [id, value] of Object.entries(named.values)) values[prefix + id] = value
-  return { openOverlays, tabs, values }
+  const next = clearScreenState(state, screen)
+  for (const id of named.open) next.openOverlays[prefix + id] = true
+  for (const [id, value] of Object.entries(named.tabs)) next.tabs[prefix + id] = value
+  for (const [id, value] of Object.entries(named.values)) next.values[prefix + id] = value
+  for (const [id, value] of Object.entries(named.disclosures ?? {})) next.disclosures[prefix + id] = value
+  return next
 }
 /** Clear only one screen's interaction state, preserving other screens. */
 export function clearScreenState(state: PreviewState, screen: string): PreviewState {
@@ -104,5 +110,6 @@ export function clearScreenState(state: PreviewState, screen: string): PreviewSt
     openOverlays: strip(state.openOverlays),
     tabs: strip(state.tabs),
     values: strip(state.values),
+    disclosures: strip(state.disclosures),
   }
 }

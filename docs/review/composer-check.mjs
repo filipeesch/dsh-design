@@ -31,6 +31,12 @@ function check(condition, message, value) {
   return condition
 }
 
+async function browseCheckout(frame) {
+  const browse = frame.getByRole('button', { name: 'Screens', exact: true })
+  if (await browse.isVisible()) await browse.click()
+  await frame.getByRole('navigation', { name: 'Screens' }).locator('a[href*="/checkout?"]').click()
+}
+
 async function dismissOnboarding(target) {
   const later = ['Configure later', 'Configurar mais tarde']
   const resume = ['Continue', 'Continuar']
@@ -254,7 +260,7 @@ await page.screenshot({ path: '/tmp/dsh-composer-desktop-start.png' })
 await openSession(page, 'Review A')
 let frame = await openPanel(page, 'review-a')
 await clearDrafts(page, 'review-a')
-await frame.getByRole('button', { name: 'checkout', exact: true }).click()
+await browseCheckout(frame)
 await frame.locator('[data-dsx-id="email"]').waitFor()
 await createDraft(frame, 'email', 'Make the email label clearer.', 'desktop panel')
 check((await pendingText(frame)) === 'Pending (1)', 'desktop panel draft appears in Pending', await pendingText(frame))
@@ -299,7 +305,7 @@ check(
 )
 
 // 4. Mobile canvas on the same desktop browser.
-await frame.getByRole('button', { name: /mobile/ }).click()
+await frame.getByLabel('Breakpoint').selectOption('mobile')
 await page.waitForTimeout(400)
 check(
   (await frame.locator('.dsx-frame').getAttribute('data-breakpoint')) === 'mobile',
@@ -378,8 +384,8 @@ await page.waitForTimeout(2500)
 await dismissOnboarding(page)
 await openSession(page, 'Review A')
 frame = await openPanel(page, 'review-a')
-await frame.getByRole('button', { name: /desktop/ }).click()
-await frame.getByRole('button', { name: 'checkout', exact: true }).click()
+await frame.getByLabel('Breakpoint').selectOption('desktop')
+await browseCheckout(frame)
 await frame.locator('[data-dsx-id="email"]').waitFor()
 await frame.getByRole('button', { name: 'Comment', exact: true }).click()
 await frame.locator('[data-dsx-id="email"]').click()

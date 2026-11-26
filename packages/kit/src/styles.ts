@@ -1,6 +1,7 @@
 /** Token, responsive, and shared style helpers used by kit components. */
 import {
   cssClassForNode,
+  resolveResponsive,
   type Breakpoint,
   type DesignElement,
   type DesignPropValue,
@@ -31,28 +32,7 @@ export function tokenValue(
   return undefined
 }
 
-/** Pick the responsive value that applies at the active breakpoint. */
-export function resolveResponsive(
-  value: DesignPropValue | undefined,
-  breakpoints: readonly Breakpoint[],
-  activeBreakpoint: string,
-): DesignPropValue | undefined {
-  if (value === null || typeof value !== 'object' || Array.isArray(value) || '$interaction' in value) return value
-  const object = value as Record<string, DesignPropValue>
-  const ordered = [...breakpoints].sort((left, right) => left.width - right.width)
-  const active = ordered.find((breakpoint) => breakpoint.name === activeBreakpoint)
-  if (active === undefined) return value
-  let chosen: DesignPropValue | undefined
-  for (const breakpoint of ordered) {
-    if (breakpoint.width > active.width) break
-    if (object[breakpoint.name] !== undefined) chosen = object[breakpoint.name]
-  }
-  if (chosen === undefined) {
-    const first = ordered.find((breakpoint) => object[breakpoint.name] !== undefined)
-    chosen = first === undefined ? undefined : object[first.name]
-  }
-  return chosen
-}
+export { resolveResponsive }
 
 /** Read a prop with responsive resolution applied. */
 export function useProp(node: DesignElement, name: string): DesignPropValue | undefined {

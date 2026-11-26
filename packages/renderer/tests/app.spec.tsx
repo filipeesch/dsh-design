@@ -109,10 +109,10 @@ describe('preview application', () => {
     ])
     render(React.createElement(App, { location: parseRoute('/design/session-test/', '') }))
     await screen.findByText('Hello preview')
-    fireEvent.click(screen.getByRole('button', { name: 'details' }))
+    fireEvent.click(screen.getByRole('link', { name: 'Details' }))
     expect(await screen.findByText('Details screen')).toBeTruthy()
     expect(window.location.pathname).toBe('/design/session-test/details')
-    fireEvent.click(screen.getByRole('button', { name: /mobile/ }))
+    fireEvent.change(screen.getByLabelText('Breakpoint'), { target: { value: 'mobile' } })
     expect(new URLSearchParams(window.location.search).get('bp')).toBe('mobile')
     expect(document.querySelector('.dsx-frame')?.getAttribute('data-breakpoint')).toBe('mobile')
   })
@@ -194,7 +194,7 @@ describe('preview application', () => {
     render(React.createElement(App))
     expect(await screen.findByText('Hello preview')).toBeTruthy()
     expect(screen.getByText(/validation error/)).toBeTruthy()
-    expect(screen.getAllByRole('button', { name: /home/ }).length).toBeGreaterThan(0)
+    expect(screen.getAllByRole('link', { name: /home/i }).length).toBeGreaterThan(0)
   })
 
   it('blocks rendering entirely on a project-level error', async () => {

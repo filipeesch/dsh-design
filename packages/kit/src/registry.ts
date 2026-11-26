@@ -13,6 +13,7 @@ import {
   Switch,
   Tabs,
   Tab,
+  Disclosure,
 } from './controls.tsx'
 import { Drawer, Modal, Popover, Tooltip, Toast, Menu } from './overlays.tsx'
 import {
@@ -53,6 +54,7 @@ export const kitComponents = {
   Switch,
   Tabs,
   Tab,
+  Disclosure,
   Card,
   List,
   ListItem,

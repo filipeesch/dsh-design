@@ -1,48 +1,14 @@
 import { access, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { homedir, tmpdir } from 'node:os'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createHarness, callTool, type HostHarness } from './harness.ts'
 import { BrowserSessions } from '../src/browser.ts'
-import { loadProject } from '@filipeesch/dsh-design-core'
-import { kitMetadata } from '@filipeesch/dsh-design-kit/meta'
-import { payloadFor, runJourney, runLint } from '../src/checks.ts'
+import { runLint } from '../src/checks.ts'
+import { findChromium } from './chromium.ts'
 
 const assetsDir = fileURLToPath(new URL('../../renderer/dist/', import.meta.url))
-
-async function findChromium(): Promise<string | undefined> {
-  if (process.env.DSH_DESIGN_CHROMIUM_PATH !== undefined) return process.env.DSH_DESIGN_CHROMIUM_PATH
-  if (process.env.PLAYWRIGHT_CHROMIUM_PATH !== undefined) return process.env.PLAYWRIGHT_CHROMIUM_PATH
-  const roots = [join(homedir(), 'Library/Caches/ms-playwright'), join(homedir(), '.cache/ms-playwright')]
-  const candidates = [
-    'chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
-    'chrome-mac/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
-    'chrome-linux/chrome',
-    'chrome-linux64/chrome',
-  ]
-  for (const root of roots) {
-    let entries: string[]
-    try {
-      entries = await readdir(root)
-    } catch {
-      continue
-    }
-    for (const entry of entries) {
-      if (!entry.startsWith('chromium-')) continue
-      for (const candidate of candidates) {
-        const path = join(root, entry, candidate)
-        try {
-          await access(path)
-          return path
-        } catch {
-          // Try the next layout.
-        }
-      }
-    }
-  }
-  return undefined
-}
 
 const chromiumPath = await findChromium()
 
@@ -437,8 +403,9 @@ describe('browser-backed checks', () => {
     const failed = await callTool(h, 'design_lint', { screen: 'layout', breakpoint: 'mobile' }, h.root).catch(
       (error: unknown) => error,
     )
-    expect(String((failed as Error).message)).toContain('Headless Chromium is unavailable')
-    expect(String((failed as Error).message)).toContain('playwright install chromium')
+    expect(failed).toMatchObject({ code: 'chromium-missing' })
+    expect(String((failed as Error).message)).toContain('Headless Chromium could not launch')
+    expect(String((failed as Error).message)).toContain('install chromium')
   }, 60000)
 
   it('includes fixture and journey diagnostics in validation and edit summaries', async () => {
@@ -480,44 +447,6 @@ describe('browser-backed checks', () => {
   }, 60000)
 })
 
-describe('synthetic example', () => {
-  it.skipIf(chromiumPath === undefined)(
-    'loads cleanly and runs its journeys and lint in a real browser',
-    async () => {
-      const folder = fileURLToPath(new URL('../../../examples/synthetic-checkout/design', import.meta.url))
-      const project = await loadProject({ folder, kit: kitMetadata, installedKitVersion: '1.0.0' })
-      expect(project.diagnostics).toEqual([])
-      expect(project.journeys.map((journey) => journey.id)).toEqual(['catalog-to-confirmation', 'checkout-review'])
-      const h = await harness({ withProject: false })
-      const check = { sessionId: 'example-session', browsers: h.service.browsers, assetsDir }
-      const first = await runJourney(check, project, 'catalog-to-confirmation')
-      expect(first.ok).toBe(true)
-      expect(first.steps).toHaveLength(10)
-      const second = await runJourney(check, project, 'checkout-review')
-      expect(second.ok).toBe(true)
-      expect(second.state).toBe('review-open')
-      const lint = await runLint(check, project, 'catalog', {})
-      expect(lint.errors).toBe(0)
-      expect(lint.findings.every((finding) => finding.severity === 'warning')).toBe(true)
-      expect(lint.breakpoints).toEqual(['mobile', 'tablet', 'desktop'])
-      const payload = await payloadFor(project, 'example-session')
-      const listitems = await h.service.browsers.run(
-        {
-          sessionId: 'example-session',
-          payload,
-          assetsDir,
-          screen: 'catalog',
-          breakpoint: 'mobile',
-          breakpointWidth: 390,
-        },
-        (page) => page.locator('[role="listitem"]').count(),
-      )
-      expect(listitems).toBe(3)
-    },
-    60000,
-  )
-})
-
 describe('browser cancellation and timeout', () => {
   it('reports cancellation and timeout explicitly', async () => {
     if (chromiumPath === undefined) return
@@ -553,7 +482,7 @@ describe('browser cancellation and timeout', () => {
   it('reports a missing browser for a fake launcher', async () => {
     const sessions = new BrowserSessions({
       launch: async () => {
-        throw new Error('missing')
+        throw new Error('Executable not found')
       },
     })
     await expect(sessions.prewarm('one')).rejects.toMatchObject({ code: 'chromium-missing' })

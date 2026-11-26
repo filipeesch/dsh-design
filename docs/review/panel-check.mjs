@@ -205,7 +205,7 @@ await page.waitForTimeout(1500)
 const phoneFrame = await openPanel(page, 'review-a')
 const phoneBox = await page.locator('iframe[title="Design preview for review-a"]').boundingBox()
 check(phoneBox !== null && phoneBox.width <= 390, 'phone panel fits the viewport', Math.round(phoneBox?.width ?? 0))
-await phoneFrame.getByRole('button', { name: /mobile/ }).click()
+await phoneFrame.getByLabel('Breakpoint').selectOption('mobile')
 await page.waitForTimeout(500)
 check(
   (await phoneFrame.locator('.dsx-frame').getAttribute('data-breakpoint')) === 'mobile',

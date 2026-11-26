@@ -525,7 +525,7 @@ describe('review layer', () => {
     await openComments()
     fireEvent.click(screen.getByRole('button', { name: 'Open' }))
     await screen.findByRole('dialog', { name: 'Comment composer' })
-    fireEvent.click(screen.getByRole('button', { name: /mobile/ }))
+    fireEvent.change(screen.getByLabelText('Breakpoint'), { target: { value: 'mobile' } })
     await waitFor(() => expect(document.querySelector('.dsx-frame')?.getAttribute('data-breakpoint')).toBe('mobile'))
     fireEvent.change(screen.getByRole('textbox', { name: 'Comment text' }), { target: { value: 'Check this' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save comment' }))

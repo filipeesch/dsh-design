@@ -15,7 +15,7 @@ import { CommentStore, CommentStoreError } from './comments.ts'
 import { collectDeterministicAssets, deterministicDocument } from './deterministic.ts'
 import { notFoundPage, renderShell } from './html.ts'
 import { MAX_MEDIA_BYTES, RASTER_TYPES, sniffRaster } from './media.ts'
-import { buildPayload, type PayloadVariantRequest } from './payload.ts'
+import { buildInteractivePayload, buildPayload, type PayloadVariantRequest } from './payload.ts'
 import type { ProjectRegistry } from './registry.ts'
 
 const TEXT_TYPES: Record<string, string> = {
@@ -516,12 +516,11 @@ export function createRouteHandler(
         }
         const requestedScreen = url.searchParams.get('screen') ?? project.entry
         const body = JSON.stringify(
-          buildPayload(
+          buildInteractivePayload(
             session,
             runtime.currentRevision,
             registry.kitVersion,
             project,
-            undefined,
             variantRequest(url.searchParams, requestedScreen ?? undefined),
           ),
         )

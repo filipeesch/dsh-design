@@ -1,0 +1,8 @@
+{
+  "screens": {
+    "help": {
+      "summary": "Find pickup and return answers without leaving the help center.",
+      "details": "Opening one answer does not close the others. This small design needs no linked screens or simulated outcomes."
+    }
+  }
+}

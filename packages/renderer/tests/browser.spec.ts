@@ -6,6 +6,8 @@ import { extname, join, resolve } from 'node:path'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { chromium, type Browser, type Page } from 'playwright-core'
 import { parseScreen } from '../../core/src/parse.ts'
+import { extractNamedStates } from '../../core/src/state.ts'
+import { kitMetadata } from '../../kit/src/meta.ts'
 import { resolveVariantDocument } from '../../core/src/variants.ts'
 import { fingerprintDesignTree } from '../../core/src/fingerprint.ts'
 import { deterministicDocument } from '../../host/src/deterministic.ts'
@@ -137,6 +139,21 @@ function variantDemoScreen(branch: 'compact' | 'spacious'): WireScreen {
     },
     ...(branch === 'spacious' && variantDemoBroken === 'stale' ? { variantStale: true } : {}),
   }
+}
+
+function disclosureScreen(edited = false): WireScreen {
+  const value = screen(
+    'disclosure',
+    `<Screen id="disclosure" states={{ expanded: { disclosures: { price: true, initially: false } } }}>
+    <Disclosure id="price" label="Price details"><Button id="inside">Inside</Button></Disclosure>
+    <Disclosure id="delivery" label="${edited ? 'Delivery updated' : 'Delivery details'}"><Text>Delivery answer</Text></Disclosure>
+    <Disclosure id="initially" label="Initially open" defaultOpen><Text>Default answer</Text></Disclosure>
+    <Button id="after">Continue</Button>
+  </Screen>`,
+  )
+  const extracted = extractNamedStates(value.root!, value.file, kitMetadata)
+  expect(extracted.diagnostics).toEqual([])
+  return { ...value, root: extracted.root, lastValidRoot: extracted.root, states: extracted.states }
 }
 
 function allScreens(revision: number, reconcile: readonly string[] = ['order-1', 'order-2']): ProjectPayload {
@@ -436,6 +453,15 @@ async function pageAt(viewport: { width: number; height: number }, path: string)
   return page
 }
 
+async function browseScreen(page: Page, id: string): Promise<void> {
+  const browse = page.getByRole('button', { name: 'Screens', exact: true })
+  if (await browse.isVisible()) await browse.click()
+  await page
+    .getByRole('navigation', { name: 'Screens' })
+    .locator('a[href*="/' + id + '?"]')
+    .click()
+}
+
 describe('real browser preview regressions', async () => {
   it.skipIf(chromiumPath === undefined)(
     'fits 390x844, keeps exact canvas widths, and avoids page overflow',
@@ -446,7 +472,7 @@ describe('real browser preview regressions', async () => {
         expect(await frame.getAttribute('data-breakpoint')).toBe('mobile')
         expect(await frame.evaluate((element) => element.getBoundingClientRect().width)).toBe(390)
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
-        await page.getByRole('button', { name: /desktop/ }).click()
+        await page.getByLabel('Breakpoint').selectOption('desktop')
         await page.waitForTimeout(200)
         expect(await frame.getAttribute('data-breakpoint')).toBe('desktop')
         expect(await frame.evaluate((element) => element.getBoundingClientRect().width)).toBe(1280)
@@ -464,7 +490,7 @@ describe('real browser preview regressions', async () => {
       const page = await pageAt({ width: 1440, height: 900 }, '/design/session-test/')
       try {
         expect(await page.getByText('Home screen').count()).toBe(1)
-        await page.getByRole('button', { name: 'checkout', exact: true }).click()
+        await browseScreen(page, 'checkout')
         await page.waitForURL('**/design/session-test/checkout?bp=desktop')
         expect(await page.getByText('Styled card').count()).toBe(1)
         await page.goBack()
@@ -473,7 +499,7 @@ describe('real browser preview regressions', async () => {
         await page.goForward()
         await page.waitForURL('**/design/session-test/checkout?bp=desktop')
         expect(await page.getByText('Styled card').count()).toBe(1)
-        await page.getByRole('button', { name: /mobile/ }).click()
+        await page.getByLabel('Breakpoint').selectOption('mobile')
         await page.waitForURL('**/design/session-test/checkout?bp=mobile')
         expect(await page.locator('.dsx-frame').getAttribute('data-breakpoint')).toBe('mobile')
         await page.reload({ waitUntil: 'domcontentloaded' })
@@ -653,12 +679,12 @@ describe('real browser preview regressions', async () => {
         expect(await page.locator('[data-dsx-id="search"] input').inputValue()).toBe('seeded')
         await page.keyboard.press('Escape')
         await page.waitForFunction(() => document.querySelector('[role="dialog"]') === null)
-        await page.getByRole('button', { name: /desktop/ }).click()
+        await page.getByLabel('Breakpoint').selectOption('desktop')
         await page.waitForURL('**/design/session-test/stated?bp=desktop&state=filter-open')
         await page.waitForTimeout(150)
         expect(await page.locator('.dsx-frame').getAttribute('data-breakpoint')).toBe('desktop')
         expect(await page.locator('[role="dialog"]').count()).toBe(0)
-        await page.getByRole('button', { name: 'home', exact: true }).click()
+        await browseScreen(page, 'home')
         await page.waitForURL('**/design/session-test/home?bp=desktop')
         await page.goBack()
         await page.waitForURL('**/design/session-test/stated?bp=desktop&state=filter-open')
@@ -666,6 +692,192 @@ describe('real browser preview regressions', async () => {
         await page.reload({ waitUntil: 'domcontentloaded' })
         await page.waitForSelector('.dsx-frame')
         await page.getByRole('dialog').waitFor({ state: 'visible' })
+      } finally {
+        await page.context().close()
+      }
+    },
+  )
+
+  it.skipIf(chromiumPath === undefined)(
+    'operates independent Disclosure toggles and seeds the same canvas in deterministic mode',
+    async () => {
+      current = payload(1, [disclosureScreen()])
+      const path = '/design/session-test/disclosure?bp=mobile&state=expanded'
+      const viewport = { width: 390, height: 844 }
+      const page = await pageAt(viewport, path)
+      const price = page.getByRole('button', { name: 'Price details' })
+      const inside = page.getByRole('button', { name: 'Inside' })
+      const delivery = page.getByRole('button', { name: 'Delivery details' })
+      const initially = page.getByRole('button', { name: 'Initially open' })
+      try {
+        expect(await price.getAttribute('aria-expanded')).toBe('true')
+        expect(await delivery.getAttribute('aria-expanded')).toBe('false')
+        expect(await initially.getAttribute('aria-expanded')).toBe('false')
+        const controlled = await price.getAttribute('aria-controls')
+        expect(await page.locator('[id="' + controlled + '"]').isVisible()).toBe(true)
+        await inside.focus()
+        await price.click()
+        expect(await price.getAttribute('aria-expanded')).toBe('false')
+        expect(await price.evaluate((node) => node === document.activeElement)).toBe(true)
+        expect(await inside.count()).toBe(0)
+        await page.keyboard.press('Tab')
+        expect(await delivery.evaluate((node) => node === document.activeElement)).toBe(true)
+        await delivery.press('Space')
+        expect(await delivery.getAttribute('aria-expanded')).toBe('true')
+        await delivery.press('Enter')
+        expect(await delivery.getAttribute('aria-expanded')).toBe('false')
+        expect(await delivery.evaluate((node) => node === document.activeElement)).toBe(true)
+        expect(new URL(page.url()).searchParams.get('state')).toBe('expanded')
+
+        current = payload(2, [disclosureScreen(true)])
+        publish(current)
+        await page.getByRole('button', { name: 'Delivery updated' }).waitFor()
+        expect(await price.getAttribute('aria-expanded')).toBe('false')
+        expect(await inside.count()).toBe(0)
+
+        await page.goto(base + path + '&deterministic=1', { waitUntil: 'domcontentloaded' })
+        await page.locator('.dsx-frame').waitFor()
+        expect(await price.getAttribute('aria-expanded')).toBe('true')
+        expect(await inside.isVisible()).toBe(true)
+        expect(await initially.getAttribute('aria-expanded')).toBe('false')
+        await page.goto(base + '/design/session-test/disclosure?bp=mobile&deterministic=1', {
+          waitUntil: 'domcontentloaded',
+        })
+        await page.locator('.dsx-frame').waitFor()
+        expect(await price.getAttribute('aria-expanded')).toBe('false')
+        expect(await initially.getAttribute('aria-expanded')).toBe('true')
+      } finally {
+        await page.context().close()
+      }
+    },
+  )
+
+  it.skipIf(chromiumPath === undefined)(
+    'navigates the focused and full flow map while preserving comment mode',
+    async () => {
+      const home = { screen: 'home' }
+      const checkout = { screen: 'checkout' }
+      const approved = { screen: 'stated', state: 'filter-open', situation: 'filters-open' }
+      const isolated = screen(
+        'isolated',
+        '<Screen id="isolated" title="Standalone help"><Text>Independent topic</Text></Screen>',
+      )
+      const authored = [
+        { id: 'approve', kind: 'simulated', label: 'Simulate approval', from: checkout, to: approved },
+        { id: 'return', kind: 'illustrative', label: 'Return to start', from: approved, to: home },
+      ] as const
+      current = {
+        ...allScreens(44),
+        screens: [...allScreens(44).screens, isolated],
+        preview: {
+          screens: { home: { summary: 'Durable summary', details: 'Longer review context' } },
+          groups: [{ id: 'shop', label: 'Shop flow', screens: ['home', 'checkout'] }],
+          situations: [
+            {
+              id: 'filters-open',
+              label: 'Open filters',
+              parent: 'stated',
+              target: { screen: 'stated', state: 'filter-open' },
+            },
+          ],
+          relationships: authored,
+        },
+        relationships: [
+          { id: 'go', kind: 'prototype', label: 'Go checkout', from: home, to: checkout },
+          { id: 'cycle', kind: 'prototype', label: 'Go home', from: checkout, to: home },
+          ...authored,
+        ],
+      }
+      const page = await pageAt({ width: 1440, height: 900 }, '/design/session-test/home?bp=desktop')
+      try {
+        expect(await page.getByText('Durable summary').count()).toBe(1)
+        await page.getByText('Screen details', { exact: true }).click()
+        expect(await page.getByText('Longer review context').isVisible()).toBe(true)
+        await page.getByRole('button', { name: 'Comment', exact: true }).click()
+        const mapButton = page.getByRole('button', { name: 'Flow map', exact: true })
+        await mapButton.click()
+        const map = page.getByRole('dialog', { name: 'Flow map' })
+        await map.waitFor()
+        expect(await map.getByText('Prototype click').count()).toBe(2)
+        expect(await map.getByText('Illustrative only').count()).toBe(1)
+        expect(await map.getByRole('link', { name: 'Standalone help' }).count()).toBe(0)
+        await page.keyboard.press('Escape')
+        expect(await map.count()).toBe(0)
+        expect(await mapButton.evaluate((node) => document.activeElement === node)).toBe(true)
+        await page.getByRole('button', { name: 'Go checkout' }).click()
+        await page.getByRole('textbox', { name: 'Comment text' }).waitFor()
+        expect(new URL(page.url()).pathname.endsWith('/home')).toBe(true)
+        await page.keyboard.press('Escape')
+        await mapButton.click()
+        await map.getByRole('button', { name: 'All screens' }).click()
+        await map.getByRole('link', { name: 'Standalone help' }).press('Enter')
+        expect(await page.getByText('Independent topic').isVisible()).toBe(true)
+        await browseScreen(page, 'checkout')
+        const outcomes = page.getByRole('region', { name: 'Simulated outcomes' })
+        const simulate = outcomes.getByRole('button', { name: 'Simulate approval' })
+        await simulate.waitFor()
+        expect(await page.locator('.dsx-frame').getByText('Simulate approval').count()).toBe(0)
+        await mapButton.click()
+        expect(await map.getByText('Manual simulation').count()).toBe(1)
+        expect(new URL(page.url()).pathname.endsWith('/checkout')).toBe(true)
+        await map.getByRole('button', { name: 'Close' }).click()
+        await simulate.click()
+        await page.waitForURL('**/stated?bp=desktop&state=filter-open&situation=filters-open')
+        await page.locator('.dsx-frame').getByRole('dialog').waitFor()
+        expect(await outcomes.count()).toBe(0)
+        expect(
+          await page
+            .getByRole('navigation', { name: 'Screens' })
+            .getByRole('link', { name: 'Open filters' })
+            .getAttribute('aria-current'),
+        ).toBe('page')
+        await page.goBack()
+        await simulate.waitFor()
+      } finally {
+        await page.context().close()
+      }
+    },
+  )
+
+  it.skipIf(chromiumPath === undefined)(
+    'browses authored situations in a narrow iframe without changing canvas width',
+    async () => {
+      current = {
+        ...allScreens(45),
+        preview: {
+          screens: {},
+          groups: [],
+          relationships: [],
+          situations: [
+            {
+              id: 'filter-situation',
+              label: 'Open filters',
+              parent: 'checkout',
+              target: { screen: 'stated', state: 'filter-open' },
+            },
+          ],
+        },
+      }
+      if (browser === undefined) throw new Error('no browser')
+      const page = await browser.newPage({ viewport: { width: 420, height: 600 } })
+      try {
+        await page.goto(base + '/__short-pane')
+        const frame = page.frameLocator('iframe')
+        const trigger = frame.getByRole('button', { name: 'Screens', exact: true })
+        await trigger.press('Enter')
+        const dialog = frame.getByRole('dialog', { name: 'Browse screens' })
+        await dialog.getByRole('link', { name: 'Open filters' }).press('Enter')
+        await dialog.waitFor({ state: 'hidden' })
+        // The named state opens a drawer, which may take focus from the browser navigator.
+        expect(
+          await trigger.evaluate(
+            (node) =>
+              node === document.activeElement || document.activeElement?.closest('.dsx-frame [role=dialog]') !== null,
+          ),
+        ).toBe(true)
+        expect(await frame.locator('.dsx-frame').getAttribute('data-breakpoint')).toBe('desktop')
+        expect(await frame.locator('.dsx-shell').getAttribute('data-dsx-state')).toBe('filter-open')
+        expect(await frame.getByRole('button', { name: 'Comment', exact: true }).isVisible()).toBe(true)
       } finally {
         await page.context().close()
       }
@@ -1099,7 +1311,7 @@ describe('real browser preview regressions', async () => {
         await page.locator('.dsx-pin').click()
         await page.locator('.dsx-review-composer').waitFor({ state: 'visible' })
         await page.getByRole('textbox', { name: 'Comment text' }).fill('Header note edited')
-        await page.getByRole('button', { name: 'catalog', exact: true }).click()
+        await browseScreen(page, 'catalog')
         await page.waitForFunction(() => {
           const composer = document.querySelector('.dsx-review-composer')
           return (
@@ -1111,7 +1323,7 @@ describe('real browser preview regressions', async () => {
         expect(await page.locator('.dsx-review-pointer').count()).toBe(0)
         expect(await page.getByRole('textbox', { name: 'Comment text' }).inputValue()).toBe('Header note edited')
         expect(await page.locator('.dsx-pin').count()).toBe(0)
-        await page.getByRole('button', { name: 'checkout', exact: true }).click()
+        await browseScreen(page, 'checkout')
         await page.waitForFunction(
           () => document.querySelector('.dsx-review-composer')?.getAttribute('data-anchor') === 'available',
         )
@@ -1129,7 +1341,7 @@ describe('real browser preview regressions', async () => {
         await page.getByRole('button', { name: /Edit comment 2 on Button/ }).click()
         await page.locator('.dsx-review-composer').waitFor({ state: 'visible' })
         await page.getByRole('textbox', { name: 'Comment text' }).fill('Filters note edited')
-        await page.getByRole('button', { name: 'reconcile', exact: true }).click()
+        await browseScreen(page, 'reconcile')
         await page.waitForFunction(() => {
           const composer = document.querySelector('.dsx-review-composer')
           return (
@@ -1141,7 +1353,7 @@ describe('real browser preview regressions', async () => {
         expect(await page.locator('.dsx-review-pointer').count()).toBe(0)
         expect(await page.locator('.dsx-pin').count()).toBe(0)
         expect(await page.getByRole('textbox', { name: 'Comment text' }).inputValue()).toBe('Filters note edited')
-        await page.getByRole('button', { name: 'checkout', exact: true }).click()
+        await browseScreen(page, 'checkout')
         await page.waitForFunction(
           () => document.querySelector('.dsx-review-composer')?.getAttribute('data-anchor') === 'available',
         )
@@ -1467,9 +1679,15 @@ describe('real browser preview regressions', async () => {
             .locator('img[alt="Pixel"]')
             .evaluate((image) => (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 0),
         ).toBe(true)
-        await first.page.getByRole('button', { name: /home/ }).click()
+        await first.page.evaluate(() => {
+          history.pushState(null, '', '/design/session-test/home?bp=desktop&deterministic=1')
+          dispatchEvent(new PopStateEvent('popstate'))
+        })
         await first.page.waitForURL('**/design/session-test/home?bp=desktop&deterministic=1')
-        await first.page.getByRole('button', { name: 'checkout', exact: true }).click()
+        await first.page.evaluate(() => {
+          history.pushState(null, '', '/design/session-test/checkout?bp=desktop&deterministic=1')
+          dispatchEvent(new PopStateEvent('popstate'))
+        })
         await first.page.waitForURL('**/design/session-test/checkout?bp=desktop&deterministic=1')
         await first.page.getByRole('button', { name: 'Filters' }).click()
         await first.page.getByText('Drawer body').waitFor({ state: 'visible' })

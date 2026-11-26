@@ -1,0 +1,12 @@
+<Journey id="help-faq" start="help" breakpoint="mobile">
+  <ExpectVisible target="pickup-answer" visible={true} />
+  <ExpectVisible target="due-date-answer" visible={false} />
+  <Tap target="due-date" />
+  <ExpectVisible target="due-date-answer" visible={true} />
+  <ExpectVisible target="pickup-answer" visible={true} />
+  <ExpectVisible target="late-return-answer" visible={false} />
+  <Tap target="pickup" />
+  <ExpectVisible target="pickup-answer" visible={false} />
+  <ExpectVisible target="due-date-answer" visible={true} />
+  <ExpectScreen screen="help" />
+</Journey>

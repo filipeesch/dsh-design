@@ -44,6 +44,18 @@ describe('design prompt', () => {
     expect(prompt).toContain('Do not turn checks into a mandatory checklist')
   })
 
+  it('points to semantic primary paths, batched references, and early visual evidence', () => {
+    const prompt = designPrompt()
+    expect(prompt).toContain('design_catalog({ names: ["Tabs", "ItemTemplate", "named-disclosure"] })')
+    expect(prompt).toContain('Prototype the clear primary path with semantic kit controls')
+    expect(prompt).toContain('Ask only when ambiguity would materially change the experience')
+    expect(prompt).toContain('valid source, measured geometry, and visual fidelity are different')
+    expect(prompt).toContain('inspect a representative canvas early')
+    expect(prompt).toContain('inspect the returned PNG path with an image reader')
+    expect(prompt).toContain('follow the host/profile setup in status')
+    expect(prompt).toContain('design_validate')
+  })
+
   it('does not embed per-component prop tables', () => {
     const prompt = designPrompt()
     expect(prompt).not.toContain('| Prop |')

@@ -3,6 +3,8 @@
  * project loader, agent tools, and the browser renderer.
  */
 
+import type { PreviewMetadata } from './preview.ts'
+
 /** One configured breakpoint name, such as `mobile` or `desktop`. */
 export type BreakpointName = string
 
@@ -246,6 +248,8 @@ export interface NamedState {
   readonly open: readonly string[]
   readonly tabs: Readonly<Record<string, string>>
   readonly values: Readonly<Record<string, DesignStateValue>>
+  /** Expansion seeds for resolved Disclosure ids, separate from overlays and field values. */
+  readonly disclosures?: Readonly<Record<string, boolean>>
   readonly source: SourceLocation
 }
 
@@ -262,6 +266,8 @@ export interface DesignProject {
   readonly fixtures: Readonly<Record<string, FixtureCollection>>
   /** Parsed journey files, including invalid ones and their diagnostics. */
   readonly journeys: readonly ProjectJourney[]
+  /** Validated review context, separate from the canvas projection. */
+  readonly preview?: PreviewMetadata
 }
 
 /** One fixture item: a stable key and flat scalar fields. */

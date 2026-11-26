@@ -4,8 +4,12 @@ import {
   countDiagnostics,
   expandScreen,
   extractNamedStates,
+  navigationRelationships,
+  PREVIEW_METADATA_FILE,
   resolveVariantDocument,
   type DesignProject,
+  type PreviewMetadata,
+  type PreviewRelationship,
   type NamedState,
   type ProjectScreen,
 } from '@filipeesch/dsh-design-core'
@@ -45,6 +49,12 @@ export interface PreviewPayload {
   readonly assets?: Record<string, string>
   /** Request-level selection failure, for example an unknown group. */
   readonly variantError?: string
+}
+
+/** Project endpoint only; deterministic rendering uses PreviewPayload. */
+export interface InteractivePreviewPayload extends PreviewPayload {
+  readonly preview?: PreviewMetadata
+  readonly relationships: readonly PreviewRelationship[]
 }
 
 /** Resolve one explicit branch projection for the payload. */
@@ -165,6 +175,47 @@ export function buildPayload(
   assets?: Record<string, string>,
   variantRequest?: PayloadVariantRequest,
 ): PreviewPayload {
+  return projectPayload(session, revision, kitVersion, project, assets, variantRequest)
+}
+
+/** Attach project review metadata and graph evidence to the interactive endpoint. */
+export function buildInteractivePayload(
+  session: string,
+  revision: number,
+  kitVersion: string,
+  project: DesignProject,
+  variantRequest?: PayloadVariantRequest,
+): InteractivePreviewPayload {
+  const relationships: PreviewRelationship[] = []
+  const knownScreens = new Set<string>()
+  const duplicateScreens = new Set<string>()
+  for (const screen of project.screens) {
+    if (screen.id === '') continue
+    if (knownScreens.has(screen.id)) duplicateScreens.add(screen.id)
+    knownScreens.add(screen.id)
+  }
+  const payload = projectPayload(session, revision, kitVersion, project, undefined, variantRequest, (root) => {
+    if (duplicateScreens.has(root.id)) return
+    for (const edge of navigationRelationships(root, kitMetadata)) {
+      if (knownScreens.has(edge.to.screen) && !duplicateScreens.has(edge.to.screen)) relationships.push(edge)
+    }
+  })
+  return {
+    ...payload,
+    relationships: [...relationships, ...(project.preview?.relationships ?? [])],
+    ...(project.preview === undefined ? {} : { preview: project.preview }),
+  }
+}
+
+function projectPayload(
+  session: string,
+  revision: number,
+  kitVersion: string,
+  project: DesignProject,
+  assets: Record<string, string> | undefined,
+  variantRequest: PayloadVariantRequest | undefined,
+  onCurrentRoot?: (root: NonNullable<ProjectScreen['root']>) => void,
+): PreviewPayload {
   let requestError: string | undefined
   let matchedRequest = false
   const screens = project.screens
@@ -182,6 +233,9 @@ export function buildPayload(
       if (selected.error !== undefined) selected = {}
       const variant = selected.variant
       const root = requested ? (variant === undefined ? undefined : selected.root) : chosenRoot
+      if (root !== undefined && screen.variantDocumentCurrent !== false && selected.stale !== true) {
+        onCurrentRoot?.(root)
+      }
       return {
         id: screen.id,
         file: screen.file,
@@ -223,7 +277,10 @@ export function buildPayload(
     kitVersion,
     tokens,
     cssVariables,
-    diagnostics: project.diagnostics,
+    diagnostics:
+      onCurrentRoot !== undefined
+        ? project.diagnostics
+        : project.diagnostics.filter((entry) => entry.file !== PREVIEW_METADATA_FILE),
     screens,
     ...(fatal === undefined ? {} : { projectError: fatal.message }),
     ...(assets === undefined ? {} : { assets }),

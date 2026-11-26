@@ -1,0 +1,7 @@
+<Journey id="document-correction" start="review" state="needs-correction" breakpoint="mobile">
+  <ExpectVisible target="correction-message" visible={true} />
+  <ExpectVisible target="correction-note" visible={true} />
+  <Tap target="correction-details" />
+  <ExpectVisible target="correction-note" visible={false} />
+  <ExpectScreen screen="review" />
+</Journey>

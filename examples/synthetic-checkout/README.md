@@ -1,41 +1,25 @@
 # Synthetic checkout example
 
-A runnable, fictitious design project that exercises named states, fixtures, and
-journeys. It is plain design data: no app code, credentials, or real customer
-records.
+A runnable, fictitious purchase flow with a catalog, checkout, and confirmation.
+It uses named states, local fixtures, and real prototype navigation. No app
+code, payments, or real customer records are involved.
 
-## Run it
+Open a **Design** session in this folder or copy its `design/` folder into a
+fresh workspace. Open the preview URL from `design_status`.
 
-Copy the `design/` folder into a disposable workspace and open a **Design**
-session from that workspace:
+1. Click **Review order** in the catalog to enter checkout. **Price details**
+   starts closed. Opening it shows the breakdown without navigating.
+2. Under **Checkout** in the screen navigator, choose **Price breakdown open**
+   (or open `/design/<session>/checkout?bp=mobile&state=prices-open`). Collapse
+   **Price details**, then use **Place order** to reach **Confirmation**.
+3. Choose **Review drawer open** to see the seeded drawer, email, and delivery
+   plan together. Use **Keep editing** to dismiss the drawer.
+4. In the map, the catalog, checkout, and confirmation are linked by real
+   prototype actions. Toggling price details does not add a map edge.
 
-```sh
-mkdir -p /tmp/dsh-design-example
-cp -R examples/synthetic-checkout/design /tmp/dsh-design-example/design
-```
-
-Then use the design tools from that session:
-
-1. `design_status` returns the local preview URL.
-2. Open the preview at `<preview-url>/checkout?bp=mobile&state=review-open` to see
-   the seeded drawer, email, and plan.
-3. `design_run_journey({ journey: "catalog-to-confirmation" })` walks the catalog,
-   checkout, and confirmation screens.
-4. `design_run_journey({ journey: "checkout-review" })` verifies the named state
-   and closes the drawer before continuing.
-5. `design_lint({ screen: "catalog" })` measures every configured breakpoint.
-   Pointer controls below 44 CSS pixels are reported as warnings; this example
-   uses large buttons so the catalog is clean.
-6. `design_screenshot({ screen: "checkout", breakpoint: "mobile" })` is unnecessary
-   for this walkthrough; request it only when visual evidence is needed.
-
-Chromium-backed checks need a Playwright Chromium matching `playwright-core`, or
-an operator-configured executable:
-
-```sh
-pnpm exec playwright install chromium
-# or
-export DSH_DESIGN_CHROMIUM_PATH=/path/to/chrome
-```
-
-The example uses only fictional brands, names, and prices.
+For automated evidence, use `design_run_journey` with `catalog-to-confirmation`,
+`checkout-price-details`, or `checkout-review`. Run
+`design_lint({ screen: "catalog" })` to measure all configured breakpoints.
+See the
+[authoring guide](../../docs/authoring.md#set-up-chromium-for-measured-checks)
+for browser setup.

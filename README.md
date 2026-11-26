@@ -2,13 +2,14 @@
 
 The design plugin for DeepSeek Harness (DSH). It lets an agent sketch a
 clickable, responsive web app in a restricted JSX-style DSL, preview it live in
-the browser, and iterate with validation feedback attached to every edit.
+the browser, and iterate with feedback when edits introduce or resolve diagnostics.
 
 This repository implements the `add-design-foundation`,
 `add-design-journeys-and-checks`, `add-design-panel-and-comments`,
-`add-design-variants`, `anchor-design-comment-composer`, and
-`add-design-handoff` OpenSpec changes. The plugin is developed here,
-outside the DSH source tree, and installed into a DSH profile with `dsh plugin`.
+`add-design-variants`, `anchor-design-comment-composer`,
+`add-design-handoff`, and `improve-design-authoring-and-preview` OpenSpec changes.
+The plugin is developed here, outside the DSH source tree, and installed into a
+DSH profile with `dsh plugin`.
 
 ## Requirements
 
@@ -162,15 +163,32 @@ that name. Neither command deletes the checkout or design folders.
 | `bundle`   | Installable DSH bundle composing the above                                            |
 
 Design files in a target repository are versioned sources: `design/design.json`,
-`design/tokens.json`, `design/screens/*.dsx`, optional
-`design/fixtures/*.json`, and optional `design/journeys/*.dsx`. Derived files
+`design/tokens.json`, `design/screens/*.dsx`, optional `design/preview.json`,
+optional `design/fixtures/*.json`, and optional `design/journeys/*.dsx`. Derived files
 (including screenshots) belong only in `design/.cache/`, which the scaffolded
 `.gitignore` excludes.
 
+## Author and review a design
+
+Start with the **Design** preset in the target workspace. Call `design_status`
+for the project, preview link, and copyable screen, state, variant, and
+breakpoint selectors; use `design_init` if the project is missing. Use
+`design_catalog({ names: ["Tabs", "ItemTemplate", "named-disclosure"] })` to
+look up components, DSX constructs, and recipes together. Author the primary
+path with semantic kit controls, validate it, and inspect a representative
+canvas early before reusing the layout.
+
+In the preview, the screen navigator shows titles and authored situations;
+variants stay in a separate selector. Open the map to see connections around
+the current screen or switch to the full project. Simulated outcomes are
+explicit choices outside the canvas and do not run automatically. See the
+[authoring and preview guide](docs/authoring.md) for syntax, examples, and
+browser setup.
+
 ## Variants
 
-A screen can hold mutually exclusive alternatives. The normal preview, journeys,
-checks, and handoff always use the chosen branch; exploring an alternative never
+A screen can hold mutually exclusive alternatives. By default, the preview,
+journeys, checks, and handoff use the chosen branch; exploring an alternative never
 changes the source.
 
 ```jsx
@@ -192,7 +210,7 @@ validated, and wrappers never render.
 - `/design/<session>/<screen>?compare=layout:compact:spacious` keeps both
   branches side by side at the same breakpoint and state. Panes are isolated and
   scroll internally on narrow hosts.
-- `design_view`, `design_query`, and `design_screenshot` accept
+- `design_view`, `design_query`, `design_lint`, and `design_screenshot` accept
   `variant: "group:branch"`; screenshots for different branches never overwrite
   each other.
 - `design_diff` compares two branches or the chosen projection at two local Git
@@ -213,7 +231,10 @@ A screen can declare deterministic starting points:
 
 Open one with `/design/<session>/orders?bp=mobile&state=filter-open`. The state is
 seeded once per screen/state route transition, survives valid hot reloads, and
-does not reseed when only the breakpoint changes.
+does not reseed when only the breakpoint changes. Named states can also seed
+boolean expansion values in `disclosures`, keyed by stable Disclosure id.
+For example, `{ disclosures: { "price-details": true } }` opens that one
+disclosure without changing the unnamed screen.
 
 Fixtures are bounded, project-local JSON arrays of flat fictitious objects with
 unique kebab-case `id`s. Bind them without writing logic:
@@ -295,24 +316,23 @@ disposable desktop and 390 CSS pixel review and
 
 `design_run_journey` executes the declared steps on the real kit controls and
 stops at the first failed step with a bounded semantic snapshot. `design_lint`
-measures every configured breakpoint for canvas/container overflow, peer
-overlap, clipped text, pointer targets under 44 CSS pixels, and validator
-off-token warnings. `design_screenshot` is opt-in and writes a deterministic
-canvas-only PNG under `design/.cache/screenshots/`. `design_view` with an
-explicit `breakpoint` returns computed boxes; without it, it stays browser-free.
+measures all configured breakpoints by default for canvas/container overflow,
+peer overlap, clipped text, pointer targets under 44 CSS pixels, and validator
+off-token warnings. It reports the measured selection even with no findings;
+media failures are reported separately. `design_screenshot` is opt-in and
+writes a deterministic, canvas-only PNG under `design/.cache/screenshots/`.
+The PNG is also returned inline when supported; otherwise inspect the reported
+path. `design_view` with an explicit `breakpoint` returns computed boxes;
+without it, it stays browser-free.
 
 Browser work is lazy: one Chromium per active DSH session, serialized per
 session, fresh isolated context per check at the project breakpoint width and a
 fixed 900 CSS px viewport height, and disposed with the session or the plugin.
 Chromium always launches with its sandbox enabled and the tool never falls back
 to an unsandboxed browser. Missing Chromium and sandbox failures are reported
-explicitly. Configure an executable with
-`DSH_DESIGN_CHROMIUM_PATH` (or `PLAYWRIGHT_CHROMIUM_PATH`), or install the
-browser matching the installed `playwright-core`:
-
-```sh
-pnpm exec playwright install chromium
-```
+explicitly. Use the host/profile setup command reported by `design_status`
+for an installed plugin, or `pnpm exec playwright install chromium` from this
+plugin's source checkout. See [Chromium setup](docs/authoring.md#set-up-chromium-for-measured-checks).
 
 ## Implementation handoff
 
@@ -330,7 +350,10 @@ state, and breakpoint matrix before opening a browser, then writes:
 - a sorted `manifest.json` separating the requested `selection` from the
   `support` closure, with explicit dimensions, choices, browser/kit identity,
   artifact sizes, and SHA-256 digests. `design.json` keeps every configured
-  breakpoint so responsive maps remain valid, even for a narrower evidence set.
+  breakpoint so responsive maps remain valid, even for a narrower evidence set;
+- durable descriptions and labeled relationships relevant to the requested
+  selections. Illustrative and simulated links are informational: they do not
+  add source or render dependencies, and no simulation controls are exported.
 
 Omitted selectors default to every valid chosen screen, the unnamed state plus
 every named state, and every configured breakpoint, bounded to 24 projections and

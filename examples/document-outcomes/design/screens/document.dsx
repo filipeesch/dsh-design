@@ -1,0 +1,18 @@
+<Screen id="document" title="Document review" maxWidth="spacing.reading" background="color.canvas">
+  <Header title="Document review" subtitle="Harbor Archive · Editorial desk" background="color.paper" padding="spacing.lg" />
+  <Stack gap="spacing.lg" padding="spacing.lg">
+    <Card variant="outlined" padding="spacing.lg" background="color.paper" radius="radius.md">
+      <Stack align="start" gap="spacing.sm">
+        <Badge tone="neutral">Draft · Revision 04</Badge>
+        <Text variant="heading">Reading room guide</Text>
+        <Text color="color.ink">An orientation handout for first-time visitors to the Harbor Archive.</Text>
+        <Text variant="caption">Sample document HA-104 · Editorial team</Text>
+      </Stack>
+    </Card>
+    <Stack gap="spacing.sm" align="start">
+      <Text variant="heading">Ready for review?</Text>
+      <Text color="color.ink">Submit the sample guide to preview the waiting screen. This does not send or store a document.</Text>
+      <Button id="submit-document" size="lg" onPress={navigate("review")}>Submit for review</Button>
+    </Stack>
+  </Stack>
+</Screen>

@@ -58,7 +58,9 @@ export class DesignService {
     this.assetsDir = config.assetsDir ?? defaultAssetsDir()
     this.browserTimeoutMs = config.browserTimeoutMs ?? 20000
     this.chromiumPath = config.chromiumPath
+    const profileName: unknown = ctx.get?.('profileContext')?.name
     this.browsers = new BrowserSessions({
+      ...(typeof profileName === 'string' && profileName !== '' ? { profileName } : {}),
       ...(config.chromiumPath === undefined ? {} : { executablePath: config.chromiumPath }),
       ...(config.browserTimeoutMs === undefined ? {} : { timeoutMs: config.browserTimeoutMs }),
       ...(config.maxBrowserSessions === undefined ? {} : { maxSessions: config.maxBrowserSessions }),

@@ -1,11 +1,17 @@
 /** One live design folder: lazy load, debounced watcher, revision counter. */
 import { watch, type FSWatcher } from 'node:fs'
-import { readdir, stat } from 'node:fs/promises'
+import { lstat, readdir, stat } from 'node:fs/promises'
 import { join, relative, sep } from 'node:path'
-import { loadProject, type DesignProject, type KitMetadata, type ParseCacheEntry } from '@filipeesch/dsh-design-core'
+import {
+  loadProject,
+  PREVIEW_METADATA_FILE,
+  type DesignProject,
+  type KitMetadata,
+  type ParseCacheEntry,
+} from '@filipeesch/dsh-design-core'
 
 /** Source files that make up a design project. */
-const SOURCE_FILES = ['design.json', 'tokens.json'] as const
+const SOURCE_FILES = ['design.json', 'tokens.json', PREVIEW_METADATA_FILE] as const
 
 /** Options for one project runtime. */
 export interface RuntimeOptions {
@@ -29,8 +35,14 @@ export async function fingerprintFolder(folder: string): Promise<FolderFingerpri
   const result: FolderFingerprint = new Map()
   const record = async (absolute: string, name: string): Promise<void> => {
     try {
-      const info = await stat(absolute)
-      result.set(name, String(info.mtimeMs) + ':' + String(info.size))
+      const info = name === PREVIEW_METADATA_FILE ? await lstat(absolute) : await stat(absolute)
+      result.set(
+        name,
+        String(info.mtimeMs) +
+          ':' +
+          String(info.size) +
+          (name === PREVIEW_METADATA_FILE ? ':' + String(info.ctimeMs) : ''),
+      )
     } catch {
       result.set(name, 'missing')
     }

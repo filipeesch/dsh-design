@@ -16,7 +16,8 @@ import { DesignEnvironmentContext, kitMetadata, type DesignEnvironment } from '@
 import { fetchProject, subscribeRevisions } from './api.ts'
 import { CompareView } from './compare.tsx'
 import { renderNode } from './interpreter.tsx'
-import { buildRouteUrl, getRoute, navigateRoute, selectBreakpoint, useRoute } from './route.ts'
+import { buildRouteUrl, getRoute, navigateRoute, pushRoute, useRoute } from './route.ts'
+import { PreviewChrome } from './preview-chrome.tsx'
 import {
   clearScreenState,
   emptyState,
@@ -48,7 +49,6 @@ export function App() {
   const bootstrap = route.deterministic
     ? (globalThis as { __DSX_PROJECT__?: ProjectPayload }).__DSX_PROJECT__
     : undefined
-  const [project, setProject] = useState<ProjectPayload | undefined>(bootstrap)
   const [loadError, setLoadError] = useState<string | undefined>()
   const [state, setState] = useState<PreviewState>(() => emptyState())
   const [ready, setReady] = useState(bootstrap !== undefined)
@@ -60,6 +60,27 @@ export function App() {
   // Only an explicit variant route needs its screen id; ordinary screen
   // navigation keeps one project payload and one seeded state.
   const variantScreen = variantParam === undefined ? undefined : route.screen
+  const projectionKey = JSON.stringify([session, variantScreen, variantParam])
+  const [snapshot, setSnapshot] = useState<{ key: string; project: ProjectPayload } | undefined>(() =>
+    bootstrap === undefined ? undefined : { key: projectionKey, project: bootstrap },
+  )
+  const project = snapshot?.key === projectionKey ? snapshot.project : undefined
+  // The chrome unmounts while a new projection loads; keep the request here.
+  const outcomeDestination = useRef<string | undefined>(undefined)
+  const navigateOutcome = useCallback((href: string) => {
+    if (href === location.pathname + location.search) return
+    outcomeDestination.current = href
+    pushRoute(href)
+  }, [])
+  const consumeOutcomeFocus = useCallback(() => {
+    const pending = outcomeDestination.current
+    if (pending === undefined || pending !== location.pathname + location.search) return false
+    outcomeDestination.current = undefined
+    return true
+  }, [])
+  useEffect(() => {
+    if (outcomeDestination.current !== location.pathname + location.search) outcomeDestination.current = undefined
+  }, [route])
   const attachFrame = useCallback((node: HTMLDivElement | null) => {
     setFrameElement(node)
   }, [])
@@ -70,20 +91,23 @@ export function App() {
   const lastTrees = useRef(new Map<string, DesignScreenNode>())
   const appliedSeed = useRef<string | undefined>(undefined)
 
-  const updateProject = useCallback((next: ProjectPayload) => {
-    setProject(next)
-    revision.current = next.revision
-    for (const screen of next.screens) {
-      const errors = countDiagnostics(screen.diagnostics).errors
-      if (errors === 0 && screen.root !== undefined) lastTrees.current.set(screen.id, screen.root)
-    }
-    setState((current) => filterState(current, next))
-    setReady(true)
-  }, [])
+  const updateProject = useCallback(
+    (next: ProjectPayload) => {
+      setSnapshot({ key: projectionKey, project: next })
+      revision.current = next.revision
+      for (const screen of next.screens) {
+        const errors = countDiagnostics(screen.diagnostics).errors
+        if (errors === 0 && screen.root !== undefined) lastTrees.current.set(screen.id, screen.root)
+      }
+      setState((current) => filterState(current, next))
+      setReady(true)
+    },
+    [projectionKey],
+  )
 
   useEffect(() => {
     if (bootstrap !== undefined) {
-      setState(loadState(session))
+      setState(emptyState())
       for (const screen of bootstrap.screens) {
         const errors = countDiagnostics(screen.diagnostics).errors
         if (errors === 0 && screen.root !== undefined) lastTrees.current.set(screen.id, screen.root)
@@ -94,7 +118,7 @@ export function App() {
     let cancelled = false
     setReady(false)
     setLoadError(undefined)
-    setProject(undefined)
+    setSnapshot(undefined)
     lastTrees.current.clear()
     fetchProject(session, undefined, {
       ...(variantScreen === undefined ? {} : { screen: variantScreen }),
@@ -102,7 +126,7 @@ export function App() {
     })
       .then((next) => {
         if (cancelled) return
-        setState(route.embed ? emptyState() : loadState(session))
+        setState(route.embed || route.deterministic ? emptyState() : loadState(session))
         updateProject(next)
       })
       .catch((error: unknown) => {
@@ -111,25 +135,32 @@ export function App() {
     return () => {
       cancelled = true
     }
-  }, [session, variantScreen, variantParam, route.embed, updateProject, bootstrap])
+  }, [session, variantScreen, variantParam, route.embed, route.deterministic, updateProject, bootstrap])
 
   useEffect(() => {
     if (route.deterministic) return
-    return subscribeRevisions(session, (event) => {
+    let subscribed = true
+    const unsubscribe = subscribeRevisions(session, (event) => {
       if (event.rev > revision.current) {
         fetchProject(session, event.rev, {
           ...(variantScreen === undefined ? {} : { screen: variantScreen }),
           ...(variantParam === undefined ? {} : { variant: variantParam }),
         })
-          .then(updateProject)
+          .then((next) => {
+            if (subscribed) updateProject(next)
+          })
           .catch(() => undefined)
       }
     })
+    return () => {
+      subscribed = false
+      unsubscribe()
+    }
   }, [session, route.deterministic, variantScreen, variantParam, updateProject])
 
   useEffect(() => {
-    if (ready && !route.embed) saveState(session, state)
-  }, [session, state, ready, route.embed])
+    if (ready && !route.embed && !route.deterministic) saveState(session, state)
+  }, [session, state, ready, route.embed, route.deterministic])
 
   const available = project?.screens.filter((screen) => screen.id !== '') ?? []
   let entryId: string | undefined = available[0]?.id
@@ -255,7 +286,8 @@ export function App() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape' || screenId === undefined) return
+      if (event.key !== 'Escape' || screenId === undefined || event.defaultPrevented) return
+      if (event.target instanceof Element && event.target.closest('.dsx-preview-dialog') !== null) return
       const last = [...openOverlays].at(-1)
       if (last === undefined) return
       setState((current) => {
@@ -326,6 +358,14 @@ export function App() {
         setState((current) =>
           screenId === undefined ? current : { ...current, tabs: { ...current.tabs, [screenId + '/' + id]: value } },
         ),
+      isDisclosureOpen: (id: string, fallback: boolean) =>
+        screenId === undefined ? fallback : (state.disclosures[screenId + '/' + id] ?? fallback),
+      setDisclosure: (id: string, expanded: boolean) =>
+        setState((current) =>
+          screenId === undefined
+            ? current
+            : { ...current, disclosures: { ...current.disclosures, [screenId + '/' + id]: expanded } },
+        ),
       imageUrl,
     }),
     [
@@ -336,6 +376,7 @@ export function App() {
       screenId,
       state.values,
       state.tabs,
+      state.disclosures,
       openOverlays,
       imageUrl,
     ],
@@ -375,6 +416,139 @@ export function App() {
 
   const frame = breakpoint === undefined ? undefined : breakpoint
   const variantIdentity = canonicalVariantIdentity(activeScreen?.effectiveSelection ?? {})
+  const canvas = (
+    <main className="dsx-stage">
+      {unknownState ? (
+        <div className="dsx-notice error" role="alert">
+          <strong>Unknown state</strong>
+          <p>
+            State "{route.state}" is not declared for screen "{screenId ?? ''}". No state was applied.
+          </p>
+        </div>
+      ) : null}
+      {incompatibleState === undefined ? null : (
+        <div className="dsx-notice error" role="alert">
+          <strong>Incompatible state for this branch</strong>
+          <p>{incompatibleState} No state was applied.</p>
+        </div>
+      )}
+      {variantError === undefined ? null : (
+        <div className="dsx-notice error" role="alert">
+          <strong>Unknown variant selection</strong>
+          <p>{variantError}</p>
+          {activeScreen?.variants === undefined || activeScreen.variants.length === 0 ? null : (
+            <ul>
+              {activeScreen.variants.map((group) => (
+                <li key={group.path}>
+                  {group.path} (chosen {group.chosen}): {group.branches.map((branch) => branch.id).join(', ')}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+      {deterministicCompare ? (
+        <div className="dsx-notice" role="status">
+          <strong>Deterministic preview</strong>
+          <p>
+            This self-contained canvas renders the chosen projection only; open the interactive comparison route to
+            compare branches.
+          </p>
+        </div>
+      ) : null}
+      {missingScreen ? (
+        <div className="dsx-notice" role="alert">
+          Screen "{route.screen}" no longer exists in this project.
+        </div>
+      ) : null}
+      {projectFatal ? (
+        <div className="dsx-notice error" role="alert">
+          <strong>Project blocked</strong>
+          <p>{project.projectError}</p>
+        </div>
+      ) : null}
+      {frame === undefined || tree === undefined ? (
+        <div className="dsx-notice error" role="alert">
+          <strong>{variantError === undefined ? 'No renderable screen' : 'Variant unavailable'}</strong>
+          <p>
+            {variantError === undefined
+              ? 'Fix the errors below and save the file. The last valid render is kept while it exists.'
+              : 'The requested branch is not rendered. The chosen branch is not substituted automatically.'}
+          </p>
+          <ul>
+            {overlayErrors.slice(0, 10).map((diagnostic, index) => (
+              <li key={index}>
+                {diagnostic.file}:{diagnostic.line}:{diagnostic.column} {diagnostic.message}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        <div className="dsx-frame-wrap">
+          <div
+            className="dsx-frame"
+            ref={attachFrame}
+            data-breakpoint={frame.name}
+            data-screen={screenId ?? ''}
+            style={{ width: frame.width, minHeight: 520 }}
+          >
+            <style>{cssText}</style>
+            <div
+              className="dsx-frame-inner"
+              style={
+                {
+                  ...(project.cssVariables as React.CSSProperties),
+                  '--dsx-font-family': '"Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif',
+                } as React.CSSProperties
+              }
+            >
+              <DesignEnvironmentContext.Provider value={environment}>
+                {renderNode(tree)}
+              </DesignEnvironmentContext.Provider>
+            </div>
+          </div>
+        </div>
+      )}
+      {overlayErrors.length > 0 && tree !== undefined ? (
+        <div className="dsx-overlay diagnostics" role="alert">
+          <strong>
+            {overlayErrors.length} validation error{overlayErrors.length === 1 ? '' : 's'}
+          </strong>
+          <ul>
+            {overlayErrors.slice(0, 8).map((diagnostic, index) => (
+              <li key={index}>
+                <code>
+                  {diagnostic.file}:{diagnostic.line}:{diagnostic.column}
+                </code>{' '}
+                {diagnostic.message}
+              </li>
+            ))}
+          </ul>
+          {activeScreen?.lastValidRoot !== undefined ? <p>Showing the last valid render.</p> : null}
+        </div>
+      ) : null}
+      {activeScreen !== undefined && activeScreen.errors === 0 && activeScreen.warnings > 0 ? (
+        <div className="dsx-overlay warnings" role="status">
+          <strong>
+            {activeScreen.warnings} warning{activeScreen.warnings === 1 ? '' : 's'}
+          </strong>
+          <ul>
+            {activeScreen.diagnostics
+              .filter((diagnostic) => diagnostic.severity === 'warning')
+              .slice(0, 5)
+              .map((diagnostic, index) => (
+                <li key={index}>
+                  <code>
+                    {diagnostic.file}:{diagnostic.line}
+                  </code>{' '}
+                  {diagnostic.message}
+                </li>
+              ))}
+          </ul>
+        </div>
+      ) : null}
+    </main>
+  )
   return (
     <div
       className={'dsx-shell' + (route.deterministic ? ' dsx-deterministic' : '') + (route.embed ? ' dsx-embed' : '')}
@@ -387,194 +561,26 @@ export function App() {
       data-dsx-variant-chosen={activeScreen?.variant?.chosen === true ? '1' : undefined}
       data-dsx-embed={route.embed ? '1' : undefined}
     >
-      {route.embed ? (
-        <div className="dsx-embed-bar">
-          {activeScreen?.variant === undefined ? null : (
-            <span className="dsx-variant-badge" data-dsx-variant-badge>
-              {activeScreen.variant.path} · {activeScreen.variant.branch}
-              {activeScreen.variant.chosen ? ' (chosen)' : ' (alternative)'}
-            </span>
-          )}
-          <div className="dsx-review-slot" ref={attachBar} />
-          <span className="dsx-meta">kit {project.kitVersion}</span>
-        </div>
+      {route.deterministic ? (
+        canvas
       ) : (
-        <header className="dsx-chrome">
-          <div className="dsx-brand">Design preview</div>
-          <nav aria-label="Screens" className="dsx-screens">
-            {available.map((screen) => (
-              <button
-                key={screen.id}
-                type="button"
-                className={screen.id === screenId ? 'active' : ''}
-                onClick={() => navigateRoute(screen.id, breakpointName)}
-              >
-                <span>{screen.id}</span>
-                {screen.errors > 0 ? <span className="dsx-badge error">{screen.errors}</span> : null}
-                {screen.errors === 0 && screen.warnings > 0 ? (
-                  <span className="dsx-badge warning">{screen.warnings}</span>
-                ) : null}
-              </button>
-            ))}
-          </nav>
-          <div className="dsx-breakpoints" role="group" aria-label="Breakpoints">
-            {breakpoints.map((candidate) => (
-              <button
-                key={candidate.name}
-                type="button"
-                className={candidate.name === breakpointName ? 'active' : ''}
-                onClick={() => selectBreakpoint(candidate.name)}
-              >
-                {candidate.name}
-                <small>{candidate.width}px</small>
-              </button>
-            ))}
-          </div>
-          {activeScreen?.variant === undefined ? null : (
-            <span className="dsx-variant-badge" data-dsx-variant-badge>
-              {activeScreen.variant.path} · {activeScreen.variant.branch}
-              {activeScreen.variant.chosen ? ' (chosen)' : ' (alternative)'}
-            </span>
-          )}
-          <div className="dsx-review-slot" ref={attachBar} />
-          <div className="dsx-meta">
-            <span>kit {project.kitVersion}</span>
-            <span>rev {project.revision}</span>
-            {route.deterministic ? <span>deterministic</span> : null}
-          </div>
-        </header>
+        <PreviewChrome
+          project={project}
+          route={route}
+          screen={activeScreen}
+          entry={entryId}
+          breakpoint={breakpointName}
+          state={appliedState}
+          canSimulate={
+            currentRoot !== undefined && tree !== undefined && !unknownState && incompatibleState === undefined
+          }
+          attachBar={attachBar}
+          onSimulate={navigateOutcome}
+          consumeOutcomeFocus={consumeOutcomeFocus}
+        >
+          {canvas}
+        </PreviewChrome>
       )}
-      <main className="dsx-stage">
-        {unknownState ? (
-          <div className="dsx-notice error" role="alert">
-            <strong>Unknown state</strong>
-            <p>
-              State "{route.state}" is not declared for screen "{screenId ?? ''}". No state was applied.
-            </p>
-          </div>
-        ) : null}
-        {incompatibleState === undefined ? null : (
-          <div className="dsx-notice error" role="alert">
-            <strong>Incompatible state for this branch</strong>
-            <p>{incompatibleState} No state was applied.</p>
-          </div>
-        )}
-        {variantError === undefined ? null : (
-          <div className="dsx-notice error" role="alert">
-            <strong>Unknown variant selection</strong>
-            <p>{variantError}</p>
-            {activeScreen?.variants === undefined || activeScreen.variants.length === 0 ? null : (
-              <ul>
-                {activeScreen.variants.map((group) => (
-                  <li key={group.path}>
-                    {group.path} (chosen {group.chosen}): {group.branches.map((branch) => branch.id).join(', ')}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
-        {deterministicCompare ? (
-          <div className="dsx-notice" role="status">
-            <strong>Deterministic preview</strong>
-            <p>
-              This self-contained canvas renders the chosen projection only; open the interactive comparison route to
-              compare branches.
-            </p>
-          </div>
-        ) : null}
-        {missingScreen ? (
-          <div className="dsx-notice" role="alert">
-            Screen "{route.screen}" no longer exists in this project.
-          </div>
-        ) : null}
-        {projectFatal ? (
-          <div className="dsx-notice error" role="alert">
-            <strong>Project blocked</strong>
-            <p>{project.projectError}</p>
-          </div>
-        ) : null}
-        {frame === undefined || tree === undefined ? (
-          <div className="dsx-notice error" role="alert">
-            <strong>{variantError === undefined ? 'No renderable screen' : 'Variant unavailable'}</strong>
-            <p>
-              {variantError === undefined
-                ? 'Fix the errors below and save the file. The last valid render is kept while it exists.'
-                : 'The requested branch is not rendered. The chosen branch is not substituted automatically.'}
-            </p>
-            <ul>
-              {overlayErrors.slice(0, 10).map((diagnostic, index) => (
-                <li key={index}>
-                  {diagnostic.file}:{diagnostic.line}:{diagnostic.column} {diagnostic.message}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : (
-          <div className="dsx-frame-wrap">
-            <div
-              className="dsx-frame"
-              ref={attachFrame}
-              data-breakpoint={frame.name}
-              data-screen={screenId ?? ''}
-              style={{ width: frame.width, minHeight: 520 }}
-            >
-              <style>{cssText}</style>
-              <div
-                className="dsx-frame-inner"
-                style={
-                  {
-                    ...(project.cssVariables as React.CSSProperties),
-                    '--dsx-font-family': '"Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif',
-                  } as React.CSSProperties
-                }
-              >
-                <DesignEnvironmentContext.Provider value={environment}>
-                  {renderNode(tree)}
-                </DesignEnvironmentContext.Provider>
-              </div>
-            </div>
-          </div>
-        )}
-        {overlayErrors.length > 0 && tree !== undefined ? (
-          <div className="dsx-overlay diagnostics" role="alert">
-            <strong>
-              {overlayErrors.length} validation error{overlayErrors.length === 1 ? '' : 's'}
-            </strong>
-            <ul>
-              {overlayErrors.slice(0, 8).map((diagnostic, index) => (
-                <li key={index}>
-                  <code>
-                    {diagnostic.file}:{diagnostic.line}:{diagnostic.column}
-                  </code>{' '}
-                  {diagnostic.message}
-                </li>
-              ))}
-            </ul>
-            {activeScreen?.lastValidRoot !== undefined ? <p>Showing the last valid render.</p> : null}
-          </div>
-        ) : null}
-        {activeScreen !== undefined && activeScreen.errors === 0 && activeScreen.warnings > 0 ? (
-          <div className="dsx-overlay warnings" role="status">
-            <strong>
-              {activeScreen.warnings} warning{activeScreen.warnings === 1 ? '' : 's'}
-            </strong>
-            <ul>
-              {activeScreen.diagnostics
-                .filter((diagnostic) => diagnostic.severity === 'warning')
-                .slice(0, 5)
-                .map((diagnostic, index) => (
-                  <li key={index}>
-                    <code>
-                      {diagnostic.file}:{diagnostic.line}
-                    </code>{' '}
-                    {diagnostic.message}
-                  </li>
-                ))}
-            </ul>
-          </div>
-        ) : null}
-      </main>
       {!route.deterministic && tree !== undefined && frame !== undefined && screenId !== undefined ? (
         <ReviewOverlay
           session={session}

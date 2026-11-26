@@ -1,0 +1,7 @@
+<Journey id="document-approved" start="review" state="approved" breakpoint="mobile">
+  <ExpectVisible target="approved-message" visible={true} />
+  <ExpectVisible target="pending-message" visible={false} />
+  <ExpectVisible target="correction-message" visible={false} />
+  <Tap target="back-to-document" />
+  <ExpectScreen screen="document" />
+</Journey>

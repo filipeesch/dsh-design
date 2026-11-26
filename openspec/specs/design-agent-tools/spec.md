@@ -21,11 +21,15 @@ The `design_init` tool SHALL scaffold a design project in the session's working 
 - **THEN** the project is scaffolded and the result lists the created files and the preview URL
 
 ### Requirement: design_status
-The `design_status` tool SHALL return whether a project exists, its folder, the pinned and installed kit versions, the screens with their IDs and files, error and warning counts, and the preview URL.
+The `design_status` tool SHALL return whether a project exists, its folder, the pinned and installed kit versions, the screens with their IDs and files, error and warning counts, and the preview URL. It SHALL additionally return the entry, configured breakpoints, and usable named states and explicit branch selectors for each screen. Ordinary rendered output SHALL expose copyable selections. A non-launching browser readiness summary SHALL distinguish unverified readiness from confirmed success or failure and provide host/profile-specific remediation.
 
 #### Scenario: Status without a project
 - **WHEN** the agent calls `design_status` where no project exists
 - **THEN** the result says the project is missing and names `design_init`, without failing
+
+#### Scenario: Discover targets before capturing
+- **WHEN** a project has a named state and an alternative branch
+- **THEN** the ordinary result identifies the screen, state, branch selector, and breakpoint without requiring a source read
 
 ### Requirement: design_validate
 The `design_validate` tool SHALL validate the whole project, one file, or one screen, and return the diagnostics defined by the DSL capability, including token, config, and cross-screen reference checks.
@@ -46,14 +50,18 @@ The `design_view` tool SHALL return a compact text projection of a screen: one i
 - **THEN** the result identifies the selected state and contains its measured node boxes
 
 ### Requirement: design_catalog
-The `design_catalog` tool SHALL list kit components with one-line descriptions, and for a named component SHALL return its props with types, allowed values, defaults, and a minimal example. An unknown name SHALL return the closest component names.
+The `design_catalog` tool SHALL list kit components with one-line descriptions, and for a named component SHALL return its props with types, allowed values, defaults, and a minimal example. An unknown name SHALL return the closest component names. It SHALL also accept a bounded batch of names and provide a compact index of supported non-component DSL constructs and composition recipes. A batch SHALL preserve request order with an individual result or suggestions per name. Each matched detail SHALL identify its kind and include an example valid in its declared context.
 
 #### Scenario: Component details
 - **WHEN** the agent calls `design_catalog` with `Select`
 - **THEN** the result lists every `Select` prop and a valid example snippet
 
+#### Scenario: Batch mixed reference lookups
+- **WHEN** a batch requests Tabs, ItemTemplate, a composition recipe, and a misspelled name
+- **THEN** the tool returns distinct matching details and suggestions only for the misspelled entry
+
 ### Requirement: Automatic validation after edits
-After any tool call in a session with a design project, if files in the design folder changed during that call, the plugin SHALL attach to that call's result a validation summary of the changed files: error and warning counts and the first diagnostics up to a fixed cap. This SHALL apply whichever tool changed the files. When no design file changed, nothing SHALL be attached.
+After any tool call that changes design sources, the plugin SHALL surface new or resolved diagnostics affecting those changes, regardless of which tool wrote the files. Each automatic report SHALL be bounded with counts and actionable locations, and nested changes SHALL be reported on the enclosing call. An unrelated call or an edit with no diagnostic change SHALL NOT emit a clean-result notice. Explicit validation SHALL continue to report the complete requested scope.
 
 #### Scenario: Edit introduces an error
 - **WHEN** the agent edits a screen file with the generic edit tool and leaves an unknown prop
@@ -63,12 +71,20 @@ After any tool call in a session with a design project, if files in the design f
 - **WHEN** the agent runs a shell command that changes no design file
 - **THEN** its result has no design validation attached
 
+#### Scenario: Silent clean edit after a repair
+- **WHEN** the agent repairs an invalid token, then makes a valid layout edit with no diagnostic change
+- **THEN** the repair is surfaced once and the clean edit emits no automatic notice
+
 ### Requirement: Journey, layout, and screenshot tools
-The design preset SHALL expose `design_run_journey`, `design_lint`, and `design_screenshot` with structured inputs and outputs matching the journey and headless contracts. Tools SHALL distinguish invalid input, missing browser runtime, and valid runs with findings or assertion failures. PNG generation SHALL occur only on explicit request.
+The design preset SHALL expose `design_run_journey`, `design_lint`, and `design_screenshot` with structured inputs and outputs matching the journey and headless contracts. Tools SHALL distinguish invalid input, missing browser runtime, and valid runs with findings or assertion failures. PNG generation SHALL occur only on explicit request. A screenshot response SHALL return the artifact location and, when the model and transport support images, include the captured image in that response. Otherwise it SHALL provide a usable artifact inspection path. Browser-facing check and capture tools SHALL reject unknown or incompatible arguments and SHALL NOT silently substitute a different target.
 
 #### Scenario: Ordinary assertion failure
 - **WHEN** a valid journey completes its browser work but fails an assertion
 - **THEN** `design_run_journey` returns a structured failed result and the failure snapshot, not an infrastructure error
+
+#### Scenario: Inspect evidence from the first response
+- **WHEN** the agent explicitly requests a valid screenshot on an image-capable route
+- **THEN** the tool returns the actual capture and its artifact path and identifies its effective selection
 
 ### Requirement: design_query
 The `design_query` tool SHALL filter the validated design tree by optional screen, component type, exact scalar prop value and stable ID pattern. Result ordering SHALL be deterministic, bounded, and include screen, node identity and source location. The tool SHALL use no browser and SHALL NOT evaluate selectors or executable input.
@@ -89,11 +105,15 @@ The design_diff tool SHALL compare two branch selections of the same screen or t
 - **THEN** the result uses the selected local revisions and the uncommitted edits and checkout remain unchanged
 
 ### Requirement: Variant-aware design inspection
-Design status and validation SHALL surface variant groups, choices and branch diagnostics. Screen inspection, queries and screenshots SHALL use the chosen projection by default and accept an explicit branch selection for exploration. Browser checks SHALL use a single valid projection, and journeys and handoff SHALL default to chosen branches. Tool results that resolve a variant selection SHALL identify the effective projection; distinct rendered inputs SHALL NOT overwrite another projection's screenshot.
+Design status and validation SHALL surface variant groups, choices and branch diagnostics. Screen inspection, queries and screenshots SHALL use the chosen projection by default and accept an explicit branch selection for exploration. Browser checks SHALL use a single valid projection, and journeys and handoff SHALL default to chosen branches. Tool results that resolve a variant selection SHALL identify the effective projection; distinct rendered inputs SHALL NOT overwrite another projection's screenshot. Layout lint SHALL also accept an explicit branch selector and report its effective selection.
 
 #### Scenario: Inspect an unchosen alternative
 - **WHEN** the agent queries or captures an explicitly selected unchosen branch
 - **THEN** the result identifies that branch, sees its specific nodes, and leaves the default chosen projection unchanged
+
+#### Scenario: Reject an unknown selection argument
+- **WHEN** a check request contains an unrecognized selection argument
+- **THEN** the result identifies the argument and no default target is measured
 
 ### Requirement: Design handoff tool contract
 The Design preset SHALL expose design_handoff with structured status, project-relative artifact references, actionable diagnostics and a bounded summary. It SHALL use validated current chosen projections independently of the transient preview and without requiring an external application. Other presets SHALL NOT gain the tool by default; their agents can read the package through authorized standard tools.

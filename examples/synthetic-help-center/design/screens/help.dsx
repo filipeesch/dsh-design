@@ -1,0 +1,19 @@
+<Screen id="help" title="Bike library help" maxWidth="spacing.reading" background="color.canvas">
+  <Header title="Bike library help" subtitle="Willow Loop · Borrowing and returns" background="color.paper" padding="spacing.lg" />
+  <Stack gap="spacing.lg" padding="spacing.lg">
+    <Card variant="outlined" padding="spacing.md" background="color.paper" radius="radius.md">
+      <Stack gap="spacing.md">
+        <Text variant="heading">Frequently asked questions</Text>
+        <Disclosure id="pickup" label="Where do I collect a bike?" defaultOpen={true}>
+          <Text id="pickup-answer" color="color.ink">Visit the Willow Loop desk by the north gate. Your helmet and lock are included.</Text>
+        </Disclosure>
+        <Disclosure id="due-date" label="How long can I borrow it?" defaultOpen={false}>
+          <Text id="due-date-answer" color="color.ink">Borrow a bike for up to three days. Bring it back by the desk's closing time on the third day.</Text>
+        </Disclosure>
+        <Disclosure id="late-return" label="What if the desk is closed?">
+          <Text id="late-return-answer" color="color.ink">Use the marked return rack by the north gate and leave the lock with the bike.</Text>
+        </Disclosure>
+      </Stack>
+    </Card>
+  </Stack>
+</Screen>
