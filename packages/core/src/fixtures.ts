@@ -269,7 +269,7 @@ function errorAt(
   ctx.diagnostics.push({
     severity: 'error',
     code,
-    file: ctx.file,
+    file: node.source.file,
     line: node.source.line,
     column: node.source.column,
     ...(node.id === undefined || node.id === '' ? {} : { nodeId: node.id }),

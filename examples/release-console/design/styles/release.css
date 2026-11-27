@@ -1,0 +1,14 @@
+.release-nav {
+  background-color: var(--dsx-color-panel);
+  border-radius: var(--dsx-radius-md);
+}
+
+.release-card {
+  background-color: var(--dsx-color-panel);
+  padding: var(--dsx-spacing-md);
+  border-radius: var(--dsx-radius-md);
+}
+
+.touch-target {
+  min-height: 44px;
+}

@@ -11,22 +11,14 @@ import { realpath } from 'node:fs/promises'
 import { relative, sep } from 'node:path'
 import { promisify } from 'node:util'
 import {
-  checkKitVersion,
-  countDiagnostics,
-  expandScreen,
-  extractNamedStates,
-  parseConfig,
-  parseFixtureCollection,
-  parseScreen,
-  parseTokens,
-  resolveVariantDocument,
-  validateTree,
+  MAX_SOURCE_FILE_BYTES,
+  projectFromSources,
+  readProjectSources,
   type DesignChild,
   type DesignElement,
   type DesignProject,
   type DesignScreenNode,
-  type Diagnostic,
-  type FixtureCollections,
+  type ProjectSourceReader,
 } from '@filipeesch/dsh-design-core'
 import { KIT_VERSION, kitMetadata } from '@filipeesch/dsh-design-kit/meta'
 import { resolveScreenProjection } from './projection.ts'
@@ -36,7 +28,7 @@ const execFileAsync = promisify(execFile)
 /** Maximum nodes traversed per projection. */
 export const MAX_DIFF_NODES = 5000
 /** Maximum bytes read from one committed file. */
-export const MAX_DIFF_FILE_BYTES = 512 * 1024
+export const MAX_DIFF_FILE_BYTES = MAX_SOURCE_FILE_BYTES
 
 /** One actionable diff diagnostic. */
 export interface DiffDiagnostic {
@@ -145,6 +137,7 @@ function collectRecords(root: DesignScreenNode): NodeRecord[] | undefined {
     const key = stable ? 'id:' + node.id : 'address:' + node.address.label
     const props: Record<string, unknown> = {}
     for (const [name, value] of Object.entries(node.props)) if (name !== 'id') props[name] = value
+    if (node.classCss !== undefined) props.classCss = node.classCss
     records.push({
       key,
       stable,
@@ -461,189 +454,108 @@ function safeRevision(value: string): boolean {
   )
 }
 
+function gitEnvironment(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_OPTIONAL_LOCKS: '0',
+    GIT_NO_LAZY_FETCH: '1',
+    GIT_NO_REPLACE_OBJECTS: '1',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_ASKPASS: 'echo',
+  }
+}
+
 async function git(cwd: string, args: string[]): Promise<string> {
   const result = await execFileAsync('git', ['-C', cwd, ...args], {
     timeout: 15000,
-    maxBuffer: 8 * 1024 * 1024,
-    env: {
-      ...process.env,
-      GIT_TERMINAL_PROMPT: '0',
-      GIT_OPTIONAL_LOCKS: '0',
-      GIT_NO_LAZY_FETCH: '1',
-      GIT_CONFIG_NOSYSTEM: '1',
-      GIT_ASKPASS: 'echo',
-    },
+    maxBuffer: 2 * 1024 * 1024,
+    env: gitEnvironment(),
   })
   return result.stdout
 }
 
-async function gitShow(cwd: string, commit: string, path: string): Promise<string | undefined> {
-  try {
-    return await git(cwd, ['show', '--no-ext-diff', '--no-textconv', commit + ':' + path])
-  } catch {
-    return undefined
+interface GitTreeEntry {
+  readonly mode: string
+  readonly oid: string
+  readonly size: number
+}
+
+function gitTreeRows(source: string): Map<string, GitTreeEntry> {
+  const entries = new Map<string, GitTreeEntry>()
+  for (const row of source.split('\0')) {
+    const parsed = /^(\d{6}) (?:blob|tree|commit) ([0-9a-f]{40,64}) +([\d-]+)\t([\s\S]+)$/.exec(row)
+    if (parsed !== null) entries.set(parsed[4]!, { mode: parsed[1]!, oid: parsed[2]!, size: Number(parsed[3]) })
   }
+  return entries
 }
 
-interface CommittedProject {
-  readonly config: ReturnType<typeof parseConfig>['config']
-  readonly tokens: ReturnType<typeof parseTokens>
-  readonly fixtures: FixtureCollections
-  readonly screens: ReadonlyMap<string, { file: string; root: DesignScreenNode }>
-  readonly diagnostics: readonly Diagnostic[]
-}
-
-async function loadCommittedProject(
-  folder: string,
+/** Start at the revision's literal design-directory tree, then only open admitted paths. */
+async function committedSourceReader(
+  cwd: string,
   commit: string,
   designRel: string,
-  diagnostics: Diagnostic[],
-): Promise<CommittedProject | undefined> {
-  const missing = (path: string): void => {
-    diagnostics.push({
-      severity: 'error',
-      code: 'history-missing-input',
-      file: path,
-      line: 1,
-      column: 1,
-      message: 'Revision ' + commit + ' has no ' + path + '; the working tree is never substituted.',
-    })
-  }
-  const listRaw = await git(folder, ['ls-tree', '-r', '--name-only', commit, '--', designRel])
-  const files = listRaw
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith(designRel + '/'))
-    .sort((left, right) => left.localeCompare(right))
-  const directChildren = (prefix: string, extension: string): string[] =>
-    files.filter((path) => {
-      if (!path.startsWith(prefix) || !path.endsWith(extension)) return false
-      return !path.slice(prefix.length).includes('/')
-    })
-  const screenFiles = directChildren(designRel + '/screens/', '.dsx')
-  const fixtureFiles = directChildren(designRel + '/fixtures/', '.json')
-  if (files.length === 0) {
-    diagnostics.push({
-      severity: 'error',
-      code: 'history-design-missing',
-      file: designRel,
-      line: 1,
-      column: 1,
-      message: 'Revision ' + commit + ' has no design folder at ' + designRel + '.',
-    })
-    return undefined
-  }
-  const configSource = await gitShow(folder, commit, designRel + '/design.json')
-  if (configSource === undefined) {
-    missing(designRel + '/design.json')
-    return undefined
-  }
-  const parsedConfig = parseConfig(configSource, designRel + '/design.json')
-  diagnostics.push(...parsedConfig.diagnostics)
-  const tokensSource = await gitShow(folder, commit, designRel + '/tokens.json')
-  if (tokensSource === undefined) {
-    missing(designRel + '/tokens.json')
-    return undefined
-  }
-  const tokens = parseTokens(tokensSource, designRel + '/tokens.json')
-  diagnostics.push(...tokens.diagnostics)
-  const fixtures: Record<string, ReturnType<typeof parseFixtureCollection>> = {}
-  for (const path of fixtureFiles) {
-    const file = path.slice(designRel.length + '/fixtures/'.length)
-    const id = file.slice(0, -'.json'.length)
-    if (!/^[a-z][a-z0-9-]*$/.test(id)) {
-      diagnostics.push({
-        severity: 'error',
-        code: 'history-fixture-name',
-        file: path,
-        line: 1,
-        column: 1,
-        message: 'Committed fixture "' + file + '" must be a kebab-case id plus ".json".',
-      })
-      return undefined
+): Promise<ProjectSourceReader | undefined> {
+  const root = gitTreeRows(
+    await git(cwd, ['--literal-pathspecs', 'ls-tree', '-z', '-l', '--full-tree', commit, '--', designRel]),
+  ).get(designRel)
+  if (root?.mode !== '040000') return undefined
+  const cache = new Map<string, Promise<Map<string, GitTreeEntry>>>()
+  function children(tree: GitTreeEntry): Promise<Map<string, GitTreeEntry>> {
+    let listing = cache.get(tree.oid)
+    if (listing === undefined) {
+      listing = git(cwd, ['ls-tree', '-z', '-l', tree.oid]).then(gitTreeRows)
+      cache.set(tree.oid, listing)
     }
-    const source = await gitShow(folder, commit, path)
-    if (source === undefined || Buffer.byteLength(source, 'utf8') > MAX_DIFF_FILE_BYTES) {
-      diagnostics.push({
-        severity: 'error',
-        code: 'history-missing-input',
-        file: path,
-        line: 1,
-        column: 1,
-        message: 'Revision ' + commit + ' has no readable fixture at ' + path + '.',
-      })
-      return undefined
-    }
-    const collection = parseFixtureCollection(id, path, source, diagnostics)
-    if (collection !== undefined) fixtures[collection.id] = collection
+    return listing
   }
-  const screens = new Map<string, { file: string; root: DesignScreenNode }>()
-  for (const path of screenFiles) {
-    const source = await gitShow(folder, commit, path)
-    if (source === undefined || Buffer.byteLength(source, 'utf8') > MAX_DIFF_FILE_BYTES) {
-      diagnostics.push({
-        severity: 'error',
-        code: 'history-missing-input',
-        file: path,
-        line: 1,
-        column: 1,
-        message: 'Revision ' + commit + ' has no readable screen at ' + path + '.',
-      })
-      return undefined
+  async function lookup(path: string): Promise<GitTreeEntry | 'unsupported' | undefined> {
+    let current: GitTreeEntry | undefined = root
+    for (const part of path.split('/')) {
+      if (current === undefined) return undefined
+      if (current.mode !== '040000') return 'unsupported'
+      current = (await children(current)).get(part)
     }
-    const parsed = parseScreen(source, path)
-    diagnostics.push(...parsed.diagnostics)
-    const document = parsed.document ?? parsed.root
-    if (document === undefined) continue
-    const resolution = resolveVariantDocument(document, {})
-    if (resolution.screen === undefined) {
-      diagnostics.push(...resolution.diagnostics)
-      continue
-    }
-    if (screens.has(resolution.screen.id)) {
-      diagnostics.push({
-        severity: 'error',
-        code: 'history-duplicate-screen',
-        file: path,
-        line: 1,
-        column: 1,
-        message: 'Revision ' + commit + ' repeats screen id "' + resolution.screen.id + '".',
-      })
-      continue
-    }
-    screens.set(resolution.screen.id, { file: path, root: resolution.screen })
+    return current
   }
   return {
-    config: parsedConfig.config,
-    tokens,
-    fixtures: fixtures as FixtureCollections,
-    screens,
-    diagnostics,
+    async read(file, maxBytes) {
+      try {
+        const entry = await lookup(file)
+        if (entry === undefined) return { kind: 'missing' }
+        if (entry === 'unsupported' || (entry.mode !== '100644' && entry.mode !== '100755'))
+          return { kind: 'unsupported' }
+        if (!Number.isSafeInteger(entry.size) || entry.size > maxBytes) return { kind: 'oversized' }
+        const result = await execFileAsync('git', ['-C', cwd, 'cat-file', 'blob', entry.oid], {
+          timeout: 15000,
+          maxBuffer: Math.max(1, maxBytes),
+          encoding: 'buffer',
+          env: gitEnvironment(),
+        })
+        return { kind: 'file', bytes: result.stdout }
+      } catch {
+        return { kind: 'unreadable' }
+      }
+    },
+    async list(directory, maxEntries) {
+      try {
+        const entry = await lookup(directory)
+        if (entry === undefined) return { kind: 'missing' }
+        if (entry === 'unsupported' || entry.mode !== '040000') return { kind: 'unsupported' }
+        const entries = await children(entry)
+        return entries.size > maxEntries ? { kind: 'oversized' } : { kind: 'entries', names: [...entries.keys()] }
+      } catch {
+        return { kind: 'unreadable' }
+      }
+    },
   }
 }
 
-function validateCommittedScreen(
-  project: CommittedProject,
-  screenId: string,
-  file: string,
-): { root?: DesignScreenNode; diagnostics: Diagnostic[] } {
-  const found = project.screens.get(screenId)
-  if (found === undefined) return { diagnostics: [] }
-  const expanded = expandScreen(found.root, project.fixtures, file)
-  const states = extractNamedStates(expanded.root, file, kitMetadata)
-  const semantic = validateTree(states.root, file, {
-    kit: kitMetadata,
-    tokens: project.tokens.tokens,
-    breakpoints: project.config.breakpoints.map((breakpoint) => breakpoint.name),
-    projectScreens: [...project.screens.keys()],
-    designFolder: '',
-    kitVersionPin: project.config.kitVersion,
-    installedKitVersion: KIT_VERSION,
-  })
-  return {
-    root: states.root,
-    diagnostics: [...expanded.diagnostics, ...semantic],
-  }
+async function readCommittedProject(folder: string, cwd: string, commit: string, designRel: string) {
+  const reader = await committedSourceReader(cwd, commit, designRel)
+  if (reader === undefined) return undefined
+  const inventory = await readProjectSources(reader)
+  return projectFromSources({ folder, kit: kitMetadata, installedKitVersion: KIT_VERSION }, inventory)
 }
 
 /** Compare the chosen projection at two locally available revisions. */
@@ -698,92 +610,89 @@ export async function diffGitRevisions(
       message: 'Revision "' + toRevision + '" is not available locally. Fetching is never attempted.',
     })
   }
-  const fromDiagnostics: Diagnostic[] = []
-  const fromProject = await loadCommittedProject(canonicalRoot, fromCommit, designRel, fromDiagnostics)
-  const fromError = fromDiagnostics.find((diagnostic) => diagnostic.severity === 'error')
-  if (fromError !== undefined) {
-    return failure('revisions', screenId, fromRevision, toRevision, {
-      code: fromError.code,
-      message: fromError.message,
-    })
-  }
-  if (fromProject === undefined) {
-    const first = fromDiagnostics.find((diagnostic) => diagnostic.severity === 'error')
-    return failure('revisions', screenId, fromRevision, toRevision, {
-      code: first?.code ?? 'history-unavailable',
-      message: first?.message ?? 'The earlier revision could not be loaded.',
-    })
-  }
-  const toDiagnostics: Diagnostic[] = []
-  const toProject = await loadCommittedProject(canonicalRoot, toCommit, designRel, toDiagnostics)
-  const toError = toDiagnostics.find((diagnostic) => diagnostic.severity === 'error')
-  if (toError !== undefined) {
-    return failure('revisions', screenId, fromRevision, toRevision, {
-      code: toError.code,
-      message: toError.message,
-    })
-  }
-  if (toProject === undefined) {
-    const first = toDiagnostics.find((diagnostic) => diagnostic.severity === 'error')
-    return failure('revisions', screenId, fromRevision, toRevision, {
-      code: first?.code ?? 'history-unavailable',
-      message: first?.message ?? 'The later revision could not be loaded.',
-    })
-  }
-  for (const [label, revision] of [
-    [fromRevision, fromProject],
-    [toRevision, toProject],
+  const revisions = []
+  for (const [label, commit] of [
+    [fromRevision, fromCommit],
+    [toRevision, toCommit],
   ] as const) {
-    if (
-      revision.config.kitVersion !== '' &&
-      checkKitVersion(revision.config.kitVersion, KIT_VERSION, 'design.json') !== undefined
-    ) {
+    let revision
+    try {
+      revision = await readCommittedProject(project.folder, canonicalRoot, commit, designRel)
+    } catch {
       return failure('revisions', screenId, fromRevision, toRevision, {
-        code: 'history-kit-incompatible',
-        message: 'Revision "' + label + '" pins a kit range the installed kit does not satisfy.',
+        code: 'history-unavailable',
+        message: 'Revision "' + label + '" could not be read within the local source limits.',
       })
     }
+    if (revision === undefined) {
+      return failure('revisions', screenId, fromRevision, toRevision, {
+        code: 'history-design-missing',
+        message: 'Revision "' + label + '" has no regular design directory at ' + designRel + '.',
+      })
+    }
+    const paletteFile = revision.config.themes?.[revision.defaultTheme]
+    const globalError = revision.diagnostics.find(
+      (entry) =>
+        entry.severity === 'error' &&
+        ((entry.file === 'design.json' && entry.code !== 'entry-missing') ||
+          entry.file === 'tokens.json' ||
+          entry.file === 'screens' ||
+          entry.file === paletteFile ||
+          entry.code === 'duplicate-screen'),
+    )
+    if (globalError !== undefined) {
+      const codes = {
+        'kit-version-mismatch': 'history-kit-incompatible',
+        'duplicate-screen': 'history-duplicate-screen',
+        'project-missing': 'history-missing-input',
+        'tokens-missing': 'history-missing-input',
+        'source-missing': 'history-missing-input',
+      } as Record<string, string>
+      return failure('revisions', screenId, fromRevision, toRevision, {
+        code: codes[globalError.code] ?? globalError.code,
+        message: 'Revision "' + label + '": ' + globalError.message + ' The worktree is never substituted.',
+      })
+    }
+    const screen = revision.screens.find((entry) => entry.id === screenId)
+    if (screen === undefined) {
+      return failure('revisions', screenId, fromRevision, toRevision, {
+        code: 'history-screen-missing',
+        message: 'Screen "' + screenId + '" is not present in revision "' + label + '".',
+      })
+    }
+    if (screen.root === undefined || (screen.blockingErrors ?? 0) > 0) {
+      const issues = screen.diagnostics.filter((entry) => entry.severity === 'error' && entry.branch === undefined)
+      const issue =
+        issues.find((entry) => entry.code.startsWith('source-') || entry.code.startsWith('stylesheet-')) ?? issues[0]
+      const detail =
+        issue === undefined
+          ? 'unknown validation error'
+          : issue.file + ':' + issue.line + ':' + issue.column + ' ' + issue.message
+      return failure('revisions', screenId, fromRevision, toRevision, {
+        code: 'history-invalid-projection',
+        message:
+          'Revision "' +
+          label +
+          '" does not produce a valid projection: ' +
+          detail +
+          ' The worktree is never substituted.',
+      })
+    }
+    const fixtureError = revision.diagnostics.find(
+      (entry) =>
+        entry.severity === 'error' &&
+        entry.file.startsWith('fixtures/') &&
+        screen.sourceDependencies?.includes(entry.file),
+    )
+    if (fixtureError !== undefined) {
+      return failure('revisions', screenId, fromRevision, toRevision, {
+        code: 'history-invalid-projection',
+        message: 'Revision "' + label + '": ' + fixtureError.message,
+      })
+    }
+    revisions.push(screen.root)
   }
-  const fromScreen = fromProject.screens.get(screenId)
-  const toScreen = toProject.screens.get(screenId)
-  if (fromScreen === undefined || toScreen === undefined) {
-    return failure('revisions', screenId, fromRevision, toRevision, {
-      code: 'history-screen-missing',
-      message:
-        'Screen "' +
-        screenId +
-        '" is not present at both revisions (' +
-        (fromScreen === undefined ? 'missing from ' + fromRevision : 'present at ' + fromRevision) +
-        ', ' +
-        (toScreen === undefined ? 'missing from ' + toRevision : 'present at ' + toRevision) +
-        ').',
-    })
-  }
-  const fromValidation = validateCommittedScreen(fromProject, screenId, fromScreen.file)
-  if (fromValidation.root === undefined || countDiagnostics(fromValidation.diagnostics).errors > 0) {
-    const first = fromValidation.diagnostics.find((diagnostic) => diagnostic.severity === 'error')
-    return failure('revisions', screenId, fromRevision, toRevision, {
-      code: 'history-invalid-projection',
-      message:
-        'Revision "' +
-        fromRevision +
-        '" does not produce a valid projection: ' +
-        (first?.message ?? 'unknown validation error'),
-    })
-  }
-  const toValidation = validateCommittedScreen(toProject, screenId, toScreen.file)
-  if (toValidation.root === undefined || countDiagnostics(toValidation.diagnostics).errors > 0) {
-    const first = toValidation.diagnostics.find((diagnostic) => diagnostic.severity === 'error')
-    return failure('revisions', screenId, fromRevision, toRevision, {
-      code: 'history-invalid-projection',
-      message:
-        'Revision "' +
-        toRevision +
-        '" does not produce a valid projection: ' +
-        (first?.message ?? 'unknown validation error'),
-    })
-  }
-  const diff = diffProjections(fromValidation.root, toValidation.root)
+  const diff = diffProjections(revisions[0]!, revisions[1]!)
   return {
     ok: diff.diagnostics.length === 0,
     mode: 'revisions',

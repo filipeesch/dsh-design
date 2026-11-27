@@ -1,17 +1,14 @@
 /** One live design folder: lazy load, debounced watcher, revision counter. */
 import { watch, type FSWatcher } from 'node:fs'
-import { lstat, readdir, stat } from 'node:fs/promises'
-import { join, relative, sep } from 'node:path'
+import { relative, sep } from 'node:path'
 import {
   loadProject,
-  PREVIEW_METADATA_FILE,
+  localProjectSourceReader,
+  readProjectSources,
   type DesignProject,
   type KitMetadata,
   type ParseCacheEntry,
 } from '@filipeesch/dsh-design-core'
-
-/** Source files that make up a design project. */
-const SOURCE_FILES = ['design.json', 'tokens.json', PREVIEW_METADATA_FILE] as const
 
 /** Options for one project runtime. */
 export interface RuntimeOptions {
@@ -32,39 +29,8 @@ export type FolderFingerprint = Map<string, string>
  * participate, so unrelated edits never trigger design validation.
  */
 export async function fingerprintFolder(folder: string): Promise<FolderFingerprint> {
-  const result: FolderFingerprint = new Map()
-  const record = async (absolute: string, name: string): Promise<void> => {
-    try {
-      const info = name === PREVIEW_METADATA_FILE ? await lstat(absolute) : await stat(absolute)
-      result.set(
-        name,
-        String(info.mtimeMs) +
-          ':' +
-          String(info.size) +
-          (name === PREVIEW_METADATA_FILE ? ':' + String(info.ctimeMs) : ''),
-      )
-    } catch {
-      result.set(name, 'missing')
-    }
-  }
-  for (const name of SOURCE_FILES) await record(join(folder, name), name)
-  const sourceDirectories: readonly (readonly [string, string])[] = [
-    ['screens', '.dsx'],
-    ['fixtures', '.json'],
-    ['journeys', '.dsx'],
-  ]
-  for (const [directory, extension] of sourceDirectories) {
-    try {
-      const entries = await readdir(join(folder, directory), { withFileTypes: true })
-      for (const entry of entries) {
-        if (entry.isFile() && entry.name.endsWith(extension))
-          await record(join(folder, directory, entry.name), directory + '/' + entry.name)
-      }
-    } catch {
-      // A missing optional directory is a valid empty set.
-    }
-  }
-  return result
+  const inventory = await readProjectSources(localProjectSourceReader(folder))
+  return new Map([...inventory.entries].map(([file, entry]) => [file, entry.fingerprint]))
 }
 
 /** Files whose fingerprint changed between two reads. */
@@ -110,17 +76,22 @@ export class ProjectRuntime {
     return this.project
   }
 
+  /** Read current sources without publishing a revision or returning retained source as current. */
+  readCurrent(): Promise<DesignProject> {
+    return loadProject({
+      folder: this.folder,
+      kit: this.options.kit,
+      installedKitVersion: this.options.installedKitVersion,
+      ...(this.project === undefined ? {} : { previous: this.project }),
+      parseCache: this.parseCache,
+    })
+  }
+
   /** Reload from disk, reusing cached parses for unchanged screen files. */
   async reload(): Promise<DesignProject> {
     const run = async (): Promise<DesignProject> => {
       if (this.disposed) return this.project as DesignProject
-      const next = await loadProject({
-        folder: this.folder,
-        kit: this.options.kit,
-        installedKitVersion: this.options.installedKitVersion,
-        ...(this.project === undefined ? {} : { previous: this.project }),
-        parseCache: this.parseCache,
-      })
+      const next = await this.readCurrent()
       this.project = next
       this.revision += 1
       for (const subscriber of [...this.subscribers]) {

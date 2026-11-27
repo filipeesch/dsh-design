@@ -1,0 +1,16 @@
+<Journey id="review-release" start="overview" breakpoint="mobile" theme="dark">
+  <Choose target="release-channel" value="stable" />
+  <ExpectValue target="release-channel" value="stable" />
+  <Tap target="pin-release" />
+  <ExpectValue target="pin-release" value={true} />
+  <Tap target="tab-logs" />
+  <ExpectVisible target="build-log" visible={true} />
+  <Tap target="publish" part="menu" />
+  <Choose target="publish" part="menu" value="draft" />
+  <ExpectScreen screen="overview" />
+  <ExpectVisible target="draft-note" visible={true} />
+  <Tap target="close-review" />
+  <Tap target="publish" part="primary" />
+  <ExpectScreen screen="history" />
+  <ExpectVisible target="history-heading" visible={true} />
+</Journey>

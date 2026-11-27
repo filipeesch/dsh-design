@@ -236,26 +236,76 @@ describe('browser-backed checks', () => {
       join(h.root, 'design', 'journeys', 'broken-target.dsx'),
       '<Journey id="broken-target" start="home"><Navigate screen="broken" /></Journey>',
     )
-    const lint = await callTool(h, 'design_lint', { screen: 'broken', breakpoint: 'mobile' }, h.root).catch(
-      (error: unknown) => error,
+    const expected = { errorCode: 'invalid-selection', error: expect.stringContaining('has validation errors') }
+    await expect(callTool(h, 'design_lint', { screen: 'broken', breakpoint: 'mobile' }, h.root)).resolves.toMatchObject(
+      expected,
     )
-    expect(String((lint as Error).message)).toContain('has validation errors')
-    const shot = await callTool(h, 'design_screenshot', { screen: 'broken', breakpoint: 'mobile' }, h.root).catch(
-      (error: unknown) => error,
+    await expect(
+      callTool(h, 'design_screenshot', { screen: 'broken', breakpoint: 'mobile' }, h.root),
+    ).resolves.toMatchObject(expected)
+    await expect(callTool(h, 'design_run_journey', { journey: 'broken-start' }, h.root)).resolves.toMatchObject(
+      expected,
     )
-    expect(String((shot as Error).message)).toContain('has validation errors')
-    const journey = await callTool(h, 'design_run_journey', { journey: 'broken-start' }, h.root).catch(
-      (error: unknown) => error,
+    await expect(callTool(h, 'design_run_journey', { journey: 'broken-target' }, h.root)).resolves.toMatchObject(
+      expected,
     )
-    expect(String((journey as Error).message)).toContain('has validation errors')
-    const target = await callTool(h, 'design_run_journey', { journey: 'broken-target' }, h.root).catch(
-      (error: unknown) => error,
-    )
-    expect(String((target as Error).message)).toContain('has validation errors')
     const layout = await callTool(h, 'design_view', { screen: 'broken', breakpoint: 'mobile' }, h.root)
     expect(layout.error).toContain('validation error')
     const staticView = await callTool(h, 'design_view', { screen: 'broken' }, h.root)
     expect(staticView.text).toContain('<Screen')
+  })
+
+  it('uses journey preflight to discover effective selectors and recover without Chromium', async () => {
+    const h = await harness({ chromiumPath: '/definitely/not/a/chromium' })
+    const folder = join(h.root, 'design')
+    const configFile = join(folder, 'design.json')
+    const config = JSON.parse(await readFile(configFile, 'utf8'))
+    await writeFile(
+      configFile,
+      JSON.stringify({ ...config, themes: { dark: 'themes/dark.json' }, defaultTheme: 'dark' }),
+    )
+    await mkdir(join(folder, 'themes'))
+    const theme = join(folder, 'themes', 'dark.json')
+    const screen = join(folder, 'screens', 'home.dsx')
+    await mkdir(join(folder, 'journeys'), { recursive: true })
+    await writeFile(
+      join(folder, 'journeys', 'review.dsx'),
+      '<Journey id="review" start="home"><ExpectScreen screen="home" /></Journey>',
+    )
+    const valid = '<Screen id="home"><Text>Review destination</Text></Screen>'
+    await writeFile(screen, valid)
+    await writeFile(theme, '{')
+    const entries = async () => {
+      const status = h.tools.get('design_status')!
+      const value = await callTool(h, 'design_status', {}, h.root)
+      expect(value.browser.status).toBe('unverified')
+      return { journey: value.journeys[0], output: status.output.render({}, value)[0].text }
+    }
+    const blocked = await entries()
+    expect(blocked.journey).toMatchObject({
+      id: 'review',
+      screen: 'home',
+      breakpoint: 'desktop',
+      theme: 'dark',
+      usable: false,
+      reason: expect.stringContaining('themes/dark.json'),
+    })
+    expect(blocked.output).toContain(blocked.journey.reason)
+    await expect(callTool(h, 'design_run_journey', { journey: 'review' }, h.root)).resolves.toMatchObject({
+      errorCode: 'invalid-selection',
+      error: blocked.journey.reason,
+    })
+    await writeFile(theme, '{"colorScheme":"dark","tokens":{}}')
+    expect((await entries()).journey).toMatchObject({ usable: true, breakpoint: 'desktop', theme: 'dark' })
+    await writeFile(screen, '<Screen id="home"><Buton /></Screen>')
+    const broken = (await entries()).journey
+    expect(broken).toMatchObject({ usable: false, reason: expect.stringContaining('screens/home.dsx') })
+    await expect(callTool(h, 'design_run_journey', { journey: 'review' }, h.root)).resolves.toMatchObject({
+      errorCode: 'invalid-selection',
+      error: broken.reason,
+    })
+    await writeFile(screen, valid)
+    expect((await entries()).journey).toMatchObject({ usable: true })
   })
 
   it.skipIf(chromiumPath === undefined)(
@@ -349,6 +399,7 @@ describe('browser-backed checks', () => {
       const lint = h.tools.get('design_lint')!
       const exec = h.exec('design_lint', h.root)
       const first = await lint.execute({ screen: 'layout', breakpoint: 'mobile' }, exec)
+      expect(first.error, 'The first render must complete before testing browser reuse.').toBeUndefined()
       expect(first.findings.length).toBeGreaterThan(0)
       expect(h.service.browsers.size).toBe(1)
       await lint.execute({ screen: 'layout', breakpoint: 'mobile' }, exec)
@@ -400,12 +451,10 @@ describe('browser-backed checks', () => {
     expect(query.matches[0].file).toBe('screens/checkout.dsx')
     const prop = await callTool(h, 'design_query', { component: 'Input', prop: 'label', value: 'Name' }, h.root)
     expect(prop.matches.map((match: any) => match.node)).toEqual(['name'])
-    const failed = await callTool(h, 'design_lint', { screen: 'layout', breakpoint: 'mobile' }, h.root).catch(
-      (error: unknown) => error,
-    )
-    expect(failed).toMatchObject({ code: 'chromium-missing' })
-    expect(String((failed as Error).message)).toContain('Headless Chromium could not launch')
-    expect(String((failed as Error).message)).toContain('install chromium')
+    const failed = await callTool(h, 'design_lint', { screen: 'layout', breakpoint: 'mobile' }, h.root)
+    expect(failed).toMatchObject({ errorCode: 'chromium-missing' })
+    expect(failed.error).toContain('Headless Chromium could not launch')
+    expect(failed.error).toContain('install chromium')
   }, 60000)
 
   it('includes fixture and journey diagnostics in validation and edit summaries', async () => {

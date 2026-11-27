@@ -1,0 +1,58 @@
+<Screen
+  id="overview"
+  title="Overview"
+  layout="console-shell"
+  maxWidth="spacing.content"
+  states={{
+    "review-open": {
+      open: ["review-drawer"],
+      tabs: { "release-tabs": "summary" },
+      values: { "pin-release": true, "release-channel": "preview" },
+      disclosures: { "release-details": true }
+    },
+    "menu-open": { open: ["release-menu"] }
+  }}
+>
+  <Stack id="release-card" gap="spacing.md" styleClass="release-card">
+    <Stack direction="row" justify="between" align="center" gap="spacing.sm" wrap={true}>
+      <Text id="release-heading" variant="heading">Aurora 2.4</Text>
+      <Button id="release-options" styleClass="touch-target" onPress={open("release-menu")}>Release options</Button>
+    </Stack>
+    <Callout id="approval-note" title="Approval pending" tone="warning">
+      <Text>This prototype does not publish. Try the simulated review actions below.</Text>
+    </Callout>
+    <Disclosure id="release-details" label="Show release notes" expandedLabel="Hide release notes">
+      <Text id="release-note">The update adds a read-only archive for the demo workspace.</Text>
+    </Disclosure>
+    <Tabs id="release-tabs" label="Release information" value="summary">
+      <Tab id="tab-summary" label="Summary" value="summary">
+        <Stack gap="spacing.md">
+          <Text id="summary-copy">Review the release channel and the fictitious repository.</Text>
+          <Stack direction="row" align="end" gap="spacing.sm">
+            <Input id="repository" label="Repository" placeholder="northstar/aurora-demo" grow />
+            <Button id="open-review" variant="secondary" onPress={open("review-drawer")}>Review</Button>
+          </Stack>
+          <SelectButton id="release-channel" label="Release channel" value="preview" options={[{ value: "preview", label: "Preview" }, { value: "stable", label: "Stable" }]} />
+          <ToggleButton id="pin-release" label="Pin release" />
+          <Switch id="notify-team" label="Notify demo team" appearance="track" />
+        </Stack>
+      </Tab>
+      <Tab id="tab-logs" label="Build log" value="logs">
+        <CodeBlock id="build-log" text={"Aurora 2.4\n  checks: 3 passed\n  artifact: aurora-demo-build-024-preview-macos-linux-and-windows.tar.gz"} />
+      </Tab>
+    </Tabs>
+    <Stack align="end">
+      <SplitButton id="publish" label="View history" menuLabel="More publish actions" onClick={navigate("history")} options={[{ value: "draft", label: "Review draft", onClick: open("review-drawer") }]} />
+    </Stack>
+  </Stack>
+  <Popover id="release-menu" title="Release options" anchor="release-options">
+    <Text>Only synthetic actions are available.</Text>
+    <Button id="close-release-menu" variant="secondary" styleClass="touch-target" onPress={close("release-menu")}>Close options</Button>
+  </Popover>
+  <Drawer id="review-drawer" title="Review draft" width="spacing.drawer">
+    <Stack gap="spacing.md">
+      <Text id="draft-note">No files will be published.</Text>
+      <Button id="close-review" onPress={close("review-drawer")}>Close review</Button>
+    </Stack>
+  </Drawer>
+</Screen>

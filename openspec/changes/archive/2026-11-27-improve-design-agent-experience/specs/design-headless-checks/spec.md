@@ -1,0 +1,41 @@
+# design-headless-checks delta
+
+## MODIFIED Requirements
+
+### Requirement: Semantic layout snapshot
+For the selected screen, named state, and breakpoint the system SHALL report the rendered node identity and component, available role/name and visibility, and a computed box in CSS pixels relative to the canvas for each measured visible node. Geometry and node order SHALL be stable in the same browser environment. The snapshot SHALL use bounded output and retain meaningful identity and location when truncated. Focus SHALL be applied before the returned-node cap, and batches SHALL measure each explicit case from a clean state using the same source and render-asset snapshot, never another case's live state.
+
+#### Scenario: Inspect a responsive component
+- **WHEN** the same declared stack is inspected at the mobile and desktop breakpoints
+- **THEN** each result contains the actual computed boxes and identifies its breakpoint
+
+### Requirement: Layout lint
+Lint SHALL report measured canvas or container overflow, peer component overlap, clipped text, pointer controls with a target dimension under 44 CSS pixels, and validator off-token warnings. By default it SHALL check every configured breakpoint. It SHALL identify the rule, screen, breakpoint, involved nodes and measured evidence; intentional parent and child containment and intentional modal backdrops SHALL NOT constitute overlap. Lint SHALL use the requested screen and optional named state and variant. Even if there are no findings, the result SHALL identify the actual screen, effective state and branch, each breakpoint measured, and the effective theme. An explicit theme SHALL be validated before measurement.
+
+#### Scenario: Identify layout issues on mobile
+- **WHEN** a fixture contains overflow, overlap, clipped text, and an undersized control on mobile but is corrected on desktop
+- **THEN** layout lint identifies the affected nodes and breakpoint without misreporting intended nesting
+
+#### Scenario: Measure the requested alternative
+- **WHEN** the chosen branch fits and an explicitly selected alternative overflows at one configured breakpoint
+- **THEN** the result identifies the alternative and the failing breakpoint and does not claim that unmeasured projections ran
+
+### Requirement: Deterministic screenshot artifacts
+An explicit screenshot request SHALL produce a PNG of the rendered canvas for a chosen screen, state and breakpoint, optionally marking a chosen stable node. The artifact SHALL be written under the project's ignored cache with a deterministic name and SHALL be available to the requesting design session for inspection. The image SHALL NOT include DSH chrome or be written to versioned sources. The capture SHALL honor and identify the effective variant as well as the screen, state, breakpoint, and theme. Distinct effective theme or stylesheet inputs SHALL NOT overwrite a capture of another rendition.
+
+#### Scenario: Capture a specific node
+- **WHEN** the agent requests a screenshot of the mobile checkout screen highlighting `filters`
+- **THEN** the resulting PNG shows that canvas and highlights the target node, and the tool reports how to inspect it
+
+#### Scenario: Capture an explicit alternative
+- **WHEN** a reviewer captures a valid unchosen branch
+- **THEN** the image and reported selection match the chosen request without changing the default branch
+
+## ADDED Requirements
+
+### Requirement: Measured selection consistency
+A diagnostic, snapshot or capture SHALL identify the effective render selection, and invalid explicit selectors SHALL NOT be replaced with defaults. Every measurement in a batch SHALL use the same validated source and relevant asset bytes; case outcomes SHALL NOT imply measurements were taken after cancellation or an infrastructure failure. Only an explicit screenshot request SHALL persist a PNG.
+
+#### Scenario: Compare a changed source across multiple cases
+- **WHEN** the source changes while a focused comparison is in progress
+- **THEN** all completed case measurements reflect the source selected for that call, not a mixture of revisions

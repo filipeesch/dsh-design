@@ -2,7 +2,7 @@
 
 Variants let one design project hold mutually exclusive alternatives while the
 chosen source stays the only projection used by journeys, browser checks, and
-the handoff.
+inspection.
 
 ## Declare alternatives
 
@@ -96,7 +96,7 @@ mutation.
 6. Reply to the owner with what was promoted and where the local records live.
 
 Discard records are excluded from discovery, preview, journeys, checks, the
-handoff, and Git (when the ignore rule is present). They exist only where they
+the preview, and Git (when the ignore rule is present). They exist only where they
 were written.
 
 ## Cleanup

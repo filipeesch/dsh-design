@@ -1,0 +1,12 @@
+<Layout>
+  <Stack id="console-shell" gap="spacing.lg" padding={{ mobile: "spacing.md", desktop: "spacing.lg" }}>
+    <Stack id="release-nav" styleClass="release-nav" padding="spacing.md" gap="spacing.sm">
+      <Header title="Release console" subtitle="Northstar · Fictitious preview" />
+      <Stack direction="row" gap="spacing.sm" wrap={true}>
+        <Button id="nav-overview" variant="secondary" onPress={navigate("overview")}>Overview</Button>
+        <Button id="nav-history" variant="secondary" onPress={navigate("history")}>History</Button>
+      </Stack>
+    </Stack>
+    <ContentSlot />
+  </Stack>
+</Layout>

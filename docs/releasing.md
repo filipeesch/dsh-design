@@ -63,6 +63,30 @@ to install the local tarball on a separate loopback port. Confirm that the
 Design preset opens an authenticated preview using the synthetic example, then
 stop the server. Do not use a real profile or workspace.
 
+## Check the Design upgrade
+
+In the disposable profile, use the [release console](../examples/release-console)
+to check that the installed bundle renders shared layouts, palettes, and
+classes. Call `design_status` in a Design session and record the **running**
+build separately from the kit pin and installed kit version; check that the
+preview and reported theme and journey selections are usable. Confirm the ten
+Design tools are registered in Design, none in Standard, and that the compact
+Design guidance is absent from Standard.
+
+Run the example's journey and inspect desktop/light, mobile/dark, and the
+mobile anchored **Release options** popover. Keep the source revision, actual
+build selection, and accessible evidence paths with the verification notes.
+PNG capture is explicit: check path delivery and inline delivery where
+supported. A clean validation result alone does not verify visual appearance.
+
+**Breaking change:** `design_handoff` is no longer registered. Release notes
+should direct consumers to [share existing paths](authoring.md#share-accepted-design-files)
+and the accepted screen, state, breakpoint, theme, variant, and source revision
+when applicable. Existing exports are not changed or deleted. Existing projects
+need no automatic pin or source migration. To roll back a project that has
+adopted the new syntax, use the prior plugin with a source revision from before
+the opt-in if that plugin cannot read the new files.
+
 ## Verify the first automated release
 
 After the first eligible merge, open **Actions → Stable plugin release** and

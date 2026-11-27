@@ -3,7 +3,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 import { loadProject } from '@filipeesch/dsh-design-core'
 import { kitMetadata } from '@filipeesch/dsh-design-kit/meta'
 import { BrowserSessions } from '../src/browser.ts'
-import { payloadFor, runJourney, runLint } from '../src/checks.ts'
+import { payloadFor, runGeometry, runJourney, runLint } from '../src/checks.ts'
 import { findChromium } from './chromium.ts'
 
 const assetsDir = fileURLToPath(new URL('../../renderer/dist/', import.meta.url))
@@ -23,6 +23,7 @@ const examples = [
     screens: ['document', 'review'],
     journeys: ['document-approved', 'document-correction', 'document-submit'],
   },
+  { name: 'release-console', screens: ['history', 'overview'], journeys: ['review-release'] },
 ]
 
 function projectFor(name: string) {
@@ -51,6 +52,71 @@ describe.each(examples)('$name', ({ name, screens, journeys }) => {
     },
     30_000,
   )
+})
+
+it('composes the release console layout twice and resolves its named palettes', async () => {
+  const project = await projectFor('release-console')
+  expect(project.entry).toBe('overview')
+  expect(project.defaultTheme).toBe('light')
+  expect(Object.keys(project.themes).sort()).toEqual(['base', 'dark', 'light'])
+  expect(project.themes.light?.tokens.tokens['color.panel']?.value).toBe('#ffffff')
+  expect(project.themes.dark?.tokens.tokens['color.panel']?.value).toBe('#202d43')
+  for (const screen of project.screens) {
+    expect(screen.root?.children).toEqual([
+      expect.objectContaining({
+        id: 'console-shell',
+        source: expect.objectContaining({ file: 'layouts/console-shell.dsx' }),
+        children: [
+          expect.objectContaining({ id: 'release-nav' }),
+          expect.objectContaining({
+            id: screen.id === 'overview' ? 'release-card' : 'history-card',
+            classCss: expect.arrayContaining([
+              { property: 'background-color', value: 'var(--dsx-color-panel)' },
+              { property: 'padding', value: 'var(--dsx-spacing-md)' },
+            ]),
+          }),
+          ...(screen.id === 'overview'
+            ? [expect.objectContaining({ id: 'release-menu' }), expect.objectContaining({ id: 'review-drawer' })]
+            : []),
+        ],
+      }),
+    ])
+  }
+})
+
+it.skipIf(chromiumPath === undefined)('measures the release console with temporary review coordinates', async () => {
+  const project = await projectFor('release-console')
+  const result = await runGeometry({ sessionId: 'release-console', browsers, assetsDir }, project, 'overview', {
+    nodes: ['review-drawer', 'release-note', 'build-log'],
+    cases: [
+      { breakpoint: 'mobile', state: 'review-open', theme: 'dark' },
+      {
+        breakpoint: 'mobile',
+        state: 'review-open',
+        theme: 'dark',
+        reviewContext: {
+          screen: 'overview',
+          selection: '',
+          theme: 'dark',
+          open: [],
+          tabs: { 'release-tabs': 'logs' },
+          disclosures: { 'release-details': false },
+        },
+      },
+      { breakpoint: 'mobile', state: 'review-open', theme: 'dark' },
+    ],
+  })
+  expect(result.cases.map((entry) => entry.nodes.map((node) => node.status))).toEqual([
+    ['visible', 'visible', 'hidden'],
+    ['hidden', 'hidden', 'visible'],
+    ['visible', 'visible', 'hidden'],
+  ])
+  expect(result.cases[1]).toMatchObject({
+    breakpoint: 'mobile',
+    theme: 'dark',
+    rendition: 'current',
+    reviewContext: true,
+  })
 })
 
 it('resolves both manual outcomes from the waiting screen to different local situations', async () => {

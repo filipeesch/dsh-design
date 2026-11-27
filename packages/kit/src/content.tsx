@@ -26,6 +26,71 @@ import {
   useTransition,
 } from './styles.ts'
 
+/** Render code literally, without the prose whitespace normalizer. */
+export function CodeBlock({ node }: DesignComponentProps) {
+  const wrap = useBooleanProp(node, 'wrap') ?? false
+  const text = typeof node.props.text === 'string' ? node.props.text : ''
+  return (
+    <pre
+      {...nodeAttributes(node)}
+      tabIndex={wrap ? undefined : 0}
+      aria-label={wrap ? undefined : 'Code'}
+      style={{
+        margin: 0,
+        padding: PAD_SM,
+        boxSizing: 'border-box',
+        minWidth: 0,
+        maxWidth: '100%',
+        background: CANVAS,
+        color: TEXT,
+        borderRadius: RADIUS,
+        border: '1px solid ' + BORDER,
+        fontFamily: 'var(--dsx-font-mono, ui-monospace, monospace)',
+        overflowX: 'auto',
+        whiteSpace: wrap ? 'pre-wrap' : 'pre',
+        overflowWrap: wrap ? 'anywhere' : undefined,
+      }}
+    >
+      <code style={{ fontFamily: 'inherit' }}>{text}</code>
+    </pre>
+  )
+}
+
+const calloutColors = {
+  info: ['var(--dsx-color-infoBg, #e0f2fe)', 'var(--dsx-color-infoText, #075985)'],
+  success: ['var(--dsx-color-successBg, #dcfce7)', 'var(--dsx-color-successText, #166534)'],
+  warning: ['var(--dsx-color-warningBg, #fef3c7)', 'var(--dsx-color-warningText, #92400e)'],
+  danger: ['var(--dsx-color-dangerBg, #fee2e2)', 'var(--dsx-color-dangerText, #991b1b)'],
+} as const
+
+/** Persistent in-flow feedback; not a live announcement. */
+export function Callout({ node, children }: DesignComponentProps) {
+  const tone = useStringProp(node, 'tone')
+  const [background, color] =
+    calloutColors[tone === 'success' || tone === 'warning' || tone === 'danger' ? tone : 'info']
+  return (
+    <div
+      {...nodeAttributes(node)}
+      style={
+        {
+          background,
+          color,
+          '--dsx-callout-copy': color,
+          padding: PAD_MD,
+          borderRadius: RADIUS,
+          borderInlineStart: '4px solid ' + color,
+          fontFamily: FONT,
+          minWidth: 0,
+          overflowWrap: 'anywhere',
+        } as CSSProperties
+      }
+    >
+      <strong>{useStringProp(node, 'title')}</strong>
+      {children}
+    </div>
+  )
+}
+
 /** Card surface. */
 export function Card({ node, children }: DesignComponentProps) {
   const variant = useStringProp(node, 'variant') ?? 'elevated'
@@ -146,11 +211,10 @@ export function Avatar({ node }: DesignComponentProps) {
 export function Badge({ node, children }: DesignComponentProps) {
   const tone = useStringProp(node, 'tone') ?? 'neutral'
   const palettes: Record<string, { background: string; color: string }> = {
-    neutral: { background: '#f1f5f9', color: '#334155' },
-    success: { background: '#dcfce7', color: '#166534' },
-    warning: { background: '#fef3c7', color: '#92400e' },
-    danger: { background: '#fee2e2', color: '#991b1b' },
-    info: { background: '#e0f2fe', color: '#075985' },
+    neutral: { background: 'var(--dsx-color-neutralBg, #f1f5f9)', color: 'var(--dsx-color-neutralText, #334155)' },
+    ...Object.fromEntries(
+      Object.entries(calloutColors).map(([key, [background, color]]) => [key, { background, color }]),
+    ),
   }
   const palette = palettes[tone] ?? palettes.neutral!
   return (

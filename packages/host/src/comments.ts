@@ -96,15 +96,20 @@ interface SessionState {
   submitTail: Promise<unknown>
 }
 
+function copyContext(context: CommentDraft['context']): CommentDraft['context'] {
+  return {
+    ...context,
+    ...(context.overlays === undefined ? {} : { overlays: [...context.overlays] }),
+    tabs: { ...context.tabs },
+    ...(context.disclosures === undefined ? {} : { disclosures: { ...context.disclosures } }),
+  }
+}
+
 function copyDraft(draft: CommentDraft): CommentDraft {
   return {
     ...draft,
     anchor: { ...draft.anchor },
-    context: {
-      ...draft.context,
-      overlays: [...draft.context.overlays],
-      tabs: { ...draft.context.tabs },
-    },
+    context: copyContext(draft.context),
   }
 }
 
@@ -166,11 +171,7 @@ export class CommentStore {
       revision: 1,
       text: input.text,
       anchor: { ...input.anchor },
-      context: {
-        ...input.context,
-        overlays: [...input.context.overlays],
-        tabs: { ...input.context.tabs },
-      },
+      context: copyContext(input.context),
       createdAt: time,
       updatedAt: time,
     }

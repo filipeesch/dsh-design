@@ -43,4 +43,9 @@ export const ALL_COMPONENT_NAMES = [
   'Progress',
   'Skeleton',
   'EmptyState',
+  'CodeBlock',
+  'Callout',
+  'ToggleButton',
+  'SelectButton',
+  'SplitButton',
 ]

@@ -27,6 +27,20 @@ export class DesignBrowserError extends Error {
   }
 }
 
+/** Recognize the transportable code rather than the class from another bundle. */
+export function designBrowserErrorCode(error: unknown): BrowserErrorCode | undefined {
+  if (error === null || typeof error !== 'object' || !('code' in error)) return undefined
+  switch (error.code) {
+    case 'chromium-missing':
+    case 'timeout':
+    case 'cancelled':
+    case 'browser-failed':
+      return error.code
+    default:
+      return undefined
+  }
+}
+
 /** One check request: immutable payload, deterministic document assets, viewport. */
 export interface RenderRequest {
   readonly sessionId: string
@@ -36,6 +50,7 @@ export interface RenderRequest {
   readonly breakpoint: string
   readonly breakpointWidth: number
   readonly state?: string
+  readonly theme?: string
   readonly signal?: AbortSignal
   readonly timeoutMs?: number
 }
@@ -270,6 +285,11 @@ export class BrowserSessions {
   /** Fixed viewport height used by every check. */
   get viewportHeight(): number {
     return this.options.viewportHeight ?? DEFAULT_CHECK_VIEWPORT_HEIGHT
+  }
+
+  /** Configured budget for a check or a complete comparison batch. */
+  get checkTimeoutMs(): number {
+    return this.options.timeoutMs ?? DEFAULT_CHECK_TIMEOUT_MS
   }
 
   /** Whether a session currently owns an active live or launching browser. */
@@ -730,19 +750,22 @@ export class BrowserSessions {
           const params = new URLSearchParams()
           params.set('bp', request.breakpoint)
           if (request.state !== undefined) params.set('state', request.state)
+          if (request.theme !== undefined) params.set('theme', request.theme)
           params.set('deterministic', '1')
           const url =
             'http://design.invalid/design/preview/' + encodeURIComponent(request.screen) + '?' + params.toString()
           await page.goto(url, { waitUntil: 'domcontentloaded' })
           await page.waitForSelector('.dsx-frame')
           await page.waitForFunction(
-            ({ screen, breakpoint }) => {
+            ({ screen, breakpoint, theme }) => {
               const frame = document.querySelector('.dsx-frame')
               return (
-                frame?.getAttribute('data-screen') === screen && frame.getAttribute('data-breakpoint') === breakpoint
+                frame?.getAttribute('data-screen') === screen &&
+                frame.getAttribute('data-breakpoint') === breakpoint &&
+                (theme === undefined || frame.getAttribute('data-theme') === theme)
               )
             },
-            { screen: request.screen, breakpoint: request.breakpoint },
+            { screen: request.screen, breakpoint: request.breakpoint, theme: request.theme },
             { timeout: Math.min(5000, remaining(deadline)) },
           )
           await page.evaluate(() => document.fonts.ready)
@@ -755,7 +778,7 @@ export class BrowserSessions {
         remaining(deadline),
       )
     } catch (error) {
-      if (error instanceof DesignBrowserError) throw error
+      if (designBrowserErrorCode(error) !== undefined) throw error
       throw new DesignBrowserError(
         'browser-failed',
         'The headless check failed: ' + (error instanceof Error ? error.message : String(error)),

@@ -1,5 +1,34 @@
 # Verification evidence
 
+## Design agent experience (improve-design-agent-experience)
+
+- The complete project gate passed with real sandboxed Chromium: 503 tests in
+  36 files, plus build, declaration checks, lint, formatting, and newline
+  checks. Test files ran sequentially (`VITEST_MAX_WORKERS=1`) to avoid competing
+  browser startup on the local host.
+- The installed DSH dispatcher reported ten Design tools and none in Standard.
+  It verified nested geometry input schemas, invalid selection before browser
+  launch, ordered focused results with no image, and an explicit missing-browser
+  result. The representative checkout journey and captured canvas were verified
+  in both builds. See [installed evaluation](review/design-eval.md).
+- The follow-up [native dispatcher checks](review/design-installed-dispatch.md)
+  verify that Status reports the running host and tools, including a real
+  on-disk replacement and mixed running builds. They also verify that the kit
+  is shown separately, validation reports the authored layout location, and
+  invalid or ambiguous scopes never return successful results. All five
+  candidate dispatcher runs passed.
+- The [legacy renderer regression](../packages/renderer/tests/legacy-appearance.spec.ts)
+  matches computed styles captured from the pinned baseline without themes or
+  classes. It covers desktop and mobile in both the interactive preview and
+  deterministic browser checks, including fields, focus, Drawer, and Toast.
+- Follow-up Chromium checks verify that changing a live popover anchor keeps
+  focus in the open panel and returns it to the new anchor on Escape. They
+  also verify at least 3:1 contrast for the opt-in dark Switch track boundary.
+- The latest release console screenshots are in
+  `/tmp/dsx-review-polish.f0YbyC/`: desktop light, mobile dark, the anchored
+  popover, the restored focus after dismissal, and the live anchor change.
+  These temporary PNGs are not committed.
+
 ## First Design turn (v0.1.1)
 
 - The installed v0.1.0 bundle reproduced the prompt assembly error when DSH
@@ -29,13 +58,13 @@
   1280 px (authenticated HTTP 200). A separate test using the local tarball
   produced the same previews. All temporary servers were stopped.
 
-## Design handoff (add-design-handoff)
+## Historical: Design handoff (add-design-handoff)
 
 Checks run on the packed bundle for this change, on top of the published
 baseline `a3f13e8`. The disposable profile used a separate loopback port; the
 live GUI on 3080 and the DSH implementation checkout were not modified. The
 repeatable procedure is in
-[`docs/review/handoff-review.md`](review/handoff-review.md).
+the historical `docs/review/handoff-review.md` at the release under test.
 
 ```sh
 pnpm run check

@@ -12,6 +12,7 @@ import {
   type PreviewRelationship,
   type NamedState,
   type ProjectScreen,
+  type ResolvedToken,
 } from '@filipeesch/dsh-design-core'
 import { kitMetadata } from '@filipeesch/dsh-design-kit/meta'
 
@@ -29,6 +30,19 @@ export interface PayloadVariant {
   readonly branch: string
   readonly chosen: boolean
   readonly selection: Readonly<Record<string, string>>
+}
+
+interface PayloadTheme {
+  readonly tokens: Readonly<Record<string, ResolvedToken>>
+  readonly cssVariables: Readonly<Record<string, string>>
+  readonly colorScheme?: 'light' | 'dark'
+  readonly stale?: boolean
+}
+
+/** Deterministic-only initial interaction and palette selection. */
+export interface PayloadRenderOptions {
+  readonly theme?: string
+  readonly initialState?: { readonly screen: string; readonly seed: NamedState }
 }
 
 /** Serialized project state consumed by the renderer. */
@@ -49,6 +63,10 @@ export interface PreviewPayload {
   readonly assets?: Record<string, string>
   /** Request-level selection failure, for example an unknown group. */
   readonly variantError?: string
+  readonly themes?: Readonly<Record<string, PayloadTheme>>
+  readonly theme?: string
+  readonly declaredThemes?: readonly string[]
+  readonly initialState?: PayloadRenderOptions['initialState']
 }
 
 /** Project endpoint only; deterministic rendering uses PreviewPayload. */
@@ -145,6 +163,19 @@ function resolveSelection(
     const detail = projection.diagnostics.find((entry) => entry.severity === 'error')?.message
     return { error: ['Variant projection could not resolve.', detail].filter(Boolean).join(' ') }
   }
+  if (snapshot !== undefined) {
+    return {
+      root: snapshot.root,
+      states: snapshot.states,
+      variant: {
+        group: group.id,
+        path: group.path,
+        branch: branch.id,
+        chosen: branch.id === group.chosen,
+        selection: snapshot.selection,
+      },
+    }
+  }
   const expanded = expandScreen(projection.screen, screen.variantFixtures ?? project.fixtures, screen.file)
   const states = extractNamedStates(expanded.root, screen.file, kitMetadata)
   if (document.type === 'Variants' && countDiagnostics(states.diagnostics).errors > 0) {
@@ -174,8 +205,9 @@ export function buildPayload(
   project: DesignProject,
   assets?: Record<string, string>,
   variantRequest?: PayloadVariantRequest,
+  options?: PayloadRenderOptions,
 ): PreviewPayload {
-  return projectPayload(session, revision, kitVersion, project, assets, variantRequest)
+  return projectPayload(session, revision, kitVersion, project, assets, variantRequest, undefined, options)
 }
 
 /** Attach project review metadata and graph evidence to the interactive endpoint. */
@@ -215,6 +247,7 @@ function projectPayload(
   assets: Record<string, string> | undefined,
   variantRequest: PayloadVariantRequest | undefined,
   onCurrentRoot?: (root: NonNullable<ProjectScreen['root']>) => void,
+  options?: PayloadRenderOptions,
 ): PreviewPayload {
   let requestError: string | undefined
   let matchedRequest = false
@@ -255,14 +288,31 @@ function projectPayload(
   if (variantRequest !== undefined && !matchedRequest) {
     requestError = 'Screen "' + variantRequest.screen + '" is not part of this project.'
   }
-  const tokens = project.tokens.tokens
-  const cssVariables: Record<string, string> = {}
-  for (const token of Object.values(tokens)) cssVariables[token.cssVar] = String(token.value)
+  const toPalette = (
+    tokens: Readonly<Record<string, ResolvedToken>>,
+    colorScheme?: 'light' | 'dark',
+  ): PayloadTheme => ({
+    tokens,
+    cssVariables: Object.fromEntries(Object.values(tokens).map((token) => [token.cssVar, String(token.value)])),
+    ...(colorScheme === undefined ? {} : { colorScheme }),
+  })
+  const themes: Record<string, PayloadTheme> = Object.create(null)
+  for (const [name, palette] of Object.entries(project.themes ?? {})) {
+    themes[name] = toPalette(palette.tokens.tokens, palette.colorScheme)
+  }
+  // Retained sources are preview-only; a deterministic render must never use them.
+  if (onCurrentRoot !== undefined) {
+    for (const [name, palette] of Object.entries(project.lastValidThemes ?? {})) {
+      themes[name] ??= { ...toPalette(palette.tokens.tokens, palette.colorScheme), stale: true }
+    }
+  }
+  const theme = options?.theme ?? project.defaultTheme ?? 'base'
+  const { tokens, cssVariables } = themes[theme] ?? toPalette(project.tokens.tokens)
   const fatal = project.diagnostics.find(
     (diagnostic) =>
       diagnostic.severity === 'error' &&
       (diagnostic.file === 'design.json' ||
-        diagnostic.file === 'tokens.json' ||
+        (diagnostic.file === 'tokens.json' && themes.base?.stale !== true) ||
         diagnostic.code === 'kit-version-mismatch' ||
         diagnostic.code === 'project-missing'),
   )
@@ -277,6 +327,14 @@ function projectPayload(
     kitVersion,
     tokens,
     cssVariables,
+    ...(project.themes === undefined
+      ? {}
+      : {
+          theme,
+          themes,
+          declaredThemes: ['base', ...Object.keys(project.config.themes ?? {})],
+        }),
+    ...(options?.initialState === undefined ? {} : { initialState: options.initialState }),
     diagnostics:
       onCurrentRoot !== undefined
         ? project.diagnostics

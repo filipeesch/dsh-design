@@ -9,6 +9,7 @@ import {
   SimulationOptions,
 } from './preview-navigation.tsx'
 import { buildRouteUrl, parseVariantParam, pushRoute, selectBreakpoint, type PreviewRoute } from './route.ts'
+import { ThemeSelector } from './theme.tsx'
 import type { ProjectPayload, WireScreen } from './wire.ts'
 
 export function PreviewChrome({
@@ -67,6 +68,7 @@ export function PreviewChrome({
   const hrefFor = (target: PreviewTarget) =>
     buildRouteUrl(target.screen, {
       breakpoint,
+      theme: route.theme,
       state: target.state,
       situation: target.situation,
       embed: route.embed,
@@ -127,6 +129,7 @@ export function PreviewChrome({
             </select>
           </label>
         )}
+        {route.pane === undefined ? <ThemeSelector project={project} route={route} /> : null}
         {variants.length === 0 || route.pane !== undefined ? null : (
           <label className="dsx-chrome-select">
             Variant
@@ -137,6 +140,7 @@ export function PreviewChrome({
                   buildRouteUrl(screen?.id, {
                     breakpoint,
                     state: route.state,
+                    theme: route.theme,
                     situation: route.situation,
                     embed: route.embed,
                     variant: parseVariantParam(event.currentTarget.value),

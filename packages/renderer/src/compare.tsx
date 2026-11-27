@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef } from 'react'
 import type { NamedState } from '@filipeesch/dsh-design-core'
 import { buildRouteUrl, setCompareRoute, type PreviewRoute, type RouteCompare } from './route.ts'
+import { ThemeNotice, ThemeSelector } from './theme.tsx'
 import type { ProjectPayload, WireScreen } from './wire.ts'
 
 /** Inputs for the comparison surface. */
@@ -30,6 +31,7 @@ function ComparePane(props: {
   readonly width: number
   readonly url: string
   readonly resetKey: string
+  readonly theme?: string
   readonly issue?: string
   readonly stale?: boolean
 }) {
@@ -56,6 +58,22 @@ function ComparePane(props: {
       // The pane may still be about:blank; the next render retries.
     }
   }, [props.url, props.resetKey])
+  const syncTheme = useCallback(() => {
+    const child = frame.current?.contentWindow
+    if (child === undefined || child === null) return
+    try {
+      if (child.location.origin !== location.origin || !child.location.pathname.startsWith('/design/')) return
+      const url = new URL(child.location.href)
+      if (props.theme === undefined) url.searchParams.delete('theme')
+      else url.searchParams.set('theme', props.theme)
+      if (url.href === child.location.href) return
+      child.history.replaceState(null, '', url.pathname + url.search)
+      child.dispatchEvent(new Event('popstate'))
+    } catch {
+      // An unavailable or unloaded pane is retried on its load event.
+    }
+  }, [props.theme])
+  useEffect(syncTheme, [syncTheme])
   return (
     <section className={'dsx-compare-pane dsx-compare-' + props.pane} style={{ width: props.width }}>
       <div className="dsx-compare-pane-label">
@@ -67,6 +85,7 @@ function ComparePane(props: {
       {props.issue === undefined ? (
         <iframe
           ref={load}
+          onLoad={syncTheme}
           title={'Design preview ' + props.pane + ' branch ' + props.branch}
           data-src={props.url}
           width={props.width}
@@ -105,7 +124,9 @@ export function CompareView({ route, project }: CompareViewProps) {
       <div className="dsx-compare dsx-compare-empty" role="alert">
         <strong>No variants to compare</strong>
         <p>Screen "{screen.id}" declares no variant groups.</p>
-        <a href={buildRouteUrl(screen.id, { breakpoint: route.breakpoint })}>Open the chosen screen</a>
+        <a href={buildRouteUrl(screen.id, { breakpoint: route.breakpoint, theme: route.theme })}>
+          Open the chosen screen
+        </a>
       </div>
     )
   }
@@ -246,10 +267,15 @@ export function CompareView({ route, project }: CompareViewProps) {
             ))}
           </select>
         </label>
-        <a className="dsx-compare-link" href={buildRouteUrl(screen.id, { breakpoint: breakpointName })}>
+        <ThemeSelector project={project} route={route} />
+        <a
+          className="dsx-compare-link"
+          href={buildRouteUrl(screen.id, { breakpoint: breakpointName, theme: route.theme })}
+        >
           Open chosen
         </a>
       </header>
+      <ThemeNotice project={project} route={route} />
       {invalid ? (
         <div className="dsx-compare-notice" role="alert">
           <strong>Unknown comparison selection</strong>
@@ -293,6 +319,7 @@ export function CompareView({ route, project }: CompareViewProps) {
                     chosen={branch === group.chosen}
                     width={width}
                     url={paneUrl(branch, pane)}
+                    theme={route.theme}
                     resetKey={resetKey}
                     {...(branchIssue(branch) === undefined ? {} : { issue: branchIssue(branch) })}
                     {...(group.branches.find((entry) => entry.id === branch)?.stale === true ? { stale: true } : {})}

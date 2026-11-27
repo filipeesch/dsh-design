@@ -1,4 +1,5 @@
 /** Semantic validation of a parsed screen against kit metadata, tokens, and the project. */
+import { validateKitControl } from './kit-controls.ts'
 import { nearest } from './diagnostics.ts'
 import { parseCssDeclarations } from './css.ts'
 import { isFixtureRef, isInteraction, isItemRef, isReference } from './refs.ts'
@@ -63,7 +64,7 @@ function tokenCandidates(ctx: ValidationContext, prop: PropMeta): string[] {
 function push(
   diagnostics: Diagnostic[],
   node: DesignElement | DesignScreenNode,
-  file: string,
+  _file: string,
   severity: 'error' | 'warning',
   code: string,
   message: string,
@@ -72,7 +73,7 @@ function push(
   diagnostics.push({
     severity,
     code,
-    file,
+    file: node.source.file,
     line: node.source.line,
     column: node.source.column,
     ...(node.id === undefined || node.id === '' ? {} : { nodeId: node.id }),
@@ -428,11 +429,17 @@ export function validateTree(root: DesignScreenNode, file: string, ctx: Validati
           file,
           'error',
           'duplicate-id',
-          `Duplicate id "${id}"; first declared at line ${String(record.node.source.line)}.`,
+          `Duplicate id "${id}"; first declared at ${record.node.source.file}:${String(record.node.source.line)}:${String(record.node.source.column)}.`,
           'Give every addressable node a unique id.',
         )
       }
     }
+  }
+
+  const stableIds = new Set(ids.keys())
+  for (const node of elements) {
+    if (node.kind !== 'element') continue
+    validateKitControl(node, stableIds, diagnostics, (ref) => interactions.push({ node, prop: 'options', ref }))
   }
 
   for (const interaction of interactions) {
@@ -512,7 +519,7 @@ function validateComponent(
     } else if (!ID_PATTERN.test(node.id)) {
       push(diagnostics, node, file, 'error', 'id-format', `Id "${node.id}" must match [a-z][a-z0-9-]*.`)
     } else {
-      ids.set(node.id, { node })
+      if (!ids.has(node.id)) ids.set(node.id, { node })
       if (meta.overlay) overlays.add(node.id)
     }
   }
@@ -531,6 +538,7 @@ function validatePropsOnly(
 ): void {
   const declared = new Map(propsOf(meta).map((prop) => [prop.name, prop]))
   for (const [name, value] of Object.entries(node.props)) {
+    if (name === 'styleClass') continue // Resolved and diagnosed by the project stylesheet pipeline.
     const prop = declared.get(name)
     if (prop === undefined) {
       const suggestion = nearest(name, [...declared.keys()])

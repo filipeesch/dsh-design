@@ -2,7 +2,6 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
-import { handoffPrompt } from '@filipeesch/dsh-design-core'
 import { designPrompt } from '../src/prompt.ts'
 import { designPresetPlugins } from '../src/plugins.ts'
 
@@ -46,7 +45,9 @@ describe('design prompt', () => {
 
   it('points to semantic primary paths, batched references, and early visual evidence', () => {
     const prompt = designPrompt()
-    expect(prompt).toContain('design_catalog({ names: ["Tabs", "ItemTemplate", "named-disclosure"] })')
+    expect(prompt).toContain('Portuguese or English `query`')
+    expect(prompt).toContain('look up related canonical names together with `names`')
+    expect(prompt).toContain('mode: "geometry"')
     expect(prompt).toContain('Prototype the clear primary path with semantic kit controls')
     expect(prompt).toContain('Ask only when ambiguity would materially change the experience')
     expect(prompt).toContain('valid source, measured geometry, and visual fidelity are different')
@@ -64,15 +65,11 @@ describe('design prompt', () => {
   })
 })
 
-describe('handoff guidance', () => {
-  it('documents the standalone manifest handoff', () => {
-    const prompt = handoffPrompt()
-    expect(prompt.length).toBeLessThan(2000)
-    expect(prompt).toContain('design_handoff')
-    expect(prompt).not.toContain('design_capture')
-    expect(prompt).toContain('manifest')
-    expect(prompt).toContain('design cache')
-    expect(prompt).toContain('ordinary file tools')
+describe('design delivery guidance', () => {
+  it('directs agents to share existing accessible paths', () => {
+    const prompt = designPrompt()
+    expect(prompt).toContain('share accessible project-relative source and evidence paths')
+    expect(prompt).not.toContain('design_handoff')
   })
 })
 

@@ -1,0 +1,60 @@
+{
+  "baseline": "53137582516a8e459dd9ed75358aa1d45f1d611d",
+  "seed": "examples/synthetic-checkout/design",
+  "requests": [
+    {
+      "id": "lookup",
+      "text": "I need to send the checkout mock to a teammate for review. What phone-sized preview should they open to see the order review drawer already open? Please leave the mock as is.",
+      "expectation": "Give a usable session preview for checkout, mobile, review-open. A fresh open has the Order review drawer visible. No source changes.",
+      "preview": {
+        "screen": "checkout",
+        "bp": "mobile",
+        "state": "review-open",
+        "visible": "Order review"
+      }
+    },
+    {
+      "id": "question",
+      "text": "Before I sign off on the phone mock, can you measure how wide and tall the Place order button actually renders on the checkout screen and tell me if both dimensions meet a 44-pixel touch target? Please do not edit anything.",
+      "expectation": "Report measured CSS pixel dimensions for place-order in the mobile default checkout, and correctly compare each to 44. Static source or a clean lint is not enough. No source changes.",
+      "preview": {
+        "screen": "checkout",
+        "bp": "mobile",
+        "visible": "Place order"
+      }
+    },
+    {
+      "id": "cross-source",
+      "text": "I’m writing a QA note. Could you run the phone demo from browsing to confirmation and give me a small table with what the reviewer does, what they should see, and what the prototype check actually observed? Don’t change the mock.",
+      "expectation": "Use the existing mobile catalog-to-confirmation journey and match observed outcomes with the prototype: Review order, checkout, select Pro, Place order, and confirmation. No source changes.",
+      "preview": {
+        "screen": "confirmation",
+        "bp": "mobile",
+        "visible": "Order placed"
+      }
+    },
+    {
+      "id": "create-simple",
+      "text": "Could you make a phone screenshot of the checkout mock with Price details already expanded, so I can attach it to my review? I want the price breakdown called out in the image. Please share where I can find the screenshot without changing the design.",
+      "expectation": "A genuine mobile checkout screenshot for prices-open highlighting price-breakdown. Verify a readable 390 px PNG in the project screenshot cache with the total shown and no source changes.",
+      "preview": {
+        "screen": "checkout",
+        "bp": "mobile",
+        "state": "prices-open",
+        "visible": "Sample total: $42.00"
+      }
+    },
+    {
+      "id": "create-complex",
+      "text": "For our handover rehearsal, please add a small “Need help?” section to the confirmation screen of this mock. Start collapsed. When opened, show “This demo does not place real orders.” and a “Back to catalog” action that goes to the catalog. Please check that I can use it on a phone and share the preview.",
+      "expectation": "Persist a collapsed-by-default disclosure on confirmation; it reveals the demo note and a working back-to-catalog control. Phone preview loads, the requested interaction works, and unrelated screens stay unchanged.",
+      "preview": {
+        "screen": "confirmation",
+        "bp": "mobile",
+        "disclosure": "Need help?",
+        "visible": "This demo does not place real orders.",
+        "navigate": "Back to catalog"
+      }
+    }
+  ]
+}

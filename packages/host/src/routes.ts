@@ -614,6 +614,7 @@ export function createRouteHandler(
             project,
             assets,
             variantRequest(url.searchParams, deterministicScreen ?? undefined),
+            { theme: url.searchParams.get('theme') ?? undefined },
           ),
         )
         send(res, 200, document.html, 'text/html; charset=utf-8', head, {

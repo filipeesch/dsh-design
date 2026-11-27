@@ -24,8 +24,9 @@ const URL_PATTERN = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi
 
 /** Stable authoring class for one node's scoped declarations. */
 export function cssClassForNode(node: DesignElement): string {
-  const identity = node.id === undefined || node.id === '' ? node.address.label : node.id
-  return 'dsx-css-' + identity.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+  const identity = node.id
+  if (identity !== undefined && /^[a-z][a-z0-9-]*$/.test(identity)) return 'dsx-css-' + identity
+  return 'dsx-css-' + node.address.label.replace(/[^0-9]+/g, '-').replace(/^-+|-+$/g, '')
 }
 
 /** Whether a URL target stays inside the design folder. */
@@ -139,25 +140,25 @@ export function parseCssDeclarations(css: string): ParsedCss {
  * `url()` targets are rebound through the preview's project-file route.
  */
 export function cssRuleText(node: DesignElement, imageUrl: (path: string) => string): string | undefined {
-  if (typeof node.props.css !== 'string') return undefined
-  const parsed = parseCssDeclarations(node.props.css)
-  if (parsed.issues.length > 0 || parsed.declarations.length === 0) return undefined
-  const declarations = parsed.declarations.map(({ property, value }) => {
+  const parsed = typeof node.props.css === 'string' ? parseCssDeclarations(node.props.css) : undefined
+  const declarations = [...(node.classCss ?? []), ...(parsed?.issues.length === 0 ? parsed.declarations : [])]
+  if (declarations.length === 0) return undefined
+  const rendered = declarations.map(({ property, value }) => {
     const rewritten = value.replace(URL_PATTERN, (_match, doubleQuoted, singleQuoted, bare) => {
       const target = String(doubleQuoted ?? singleQuoted ?? bare ?? '')
       return 'url("' + imageUrl(target.trim().replace(/^\.\//, '')) + '")'
     })
     return property + ': ' + rewritten + ' !important;'
   })
-  return '.' + cssClassForNode(node) + ' { ' + declarations.join(' ') + ' }'
+  return '.' + cssClassForNode(node) + ' { ' + rendered.join(' ') + ' }'
 }
 
 /** Collect all scoped CSS rules for one tree. */
-export function collectCssRules(root: DesignElement, imageUrl: (path: string) => string): string[] {
+export function collectCssRules(root: DesignElement, imageUrl: (path: string) => string, boundary = ''): string[] {
   const rules: string[] = []
   const visit = (node: DesignElement): void => {
     const rule = cssRuleText(node, imageUrl)
-    if (rule !== undefined) rules.push(rule)
+    if (rule !== undefined) rules.push(boundary === '' ? rule : boundary + ' ' + rule)
     for (const child of node.children) if (child.kind === 'element') visit(child)
   }
   visit(root)

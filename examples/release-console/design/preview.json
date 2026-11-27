@@ -1,0 +1,30 @@
+{
+  "screens": {
+    "history": {
+      "summary": "Inspect the archived fictitious release history."
+    },
+    "overview": {
+      "summary": "Review the Aurora release without publishing to a real service."
+    }
+  },
+  "situations": [
+    {
+      "id": "review-open",
+      "label": "Draft review open",
+      "parent": "overview",
+      "target": {
+        "screen": "overview",
+        "state": "review-open"
+      }
+    },
+    {
+      "id": "menu-open",
+      "label": "Anchored release options",
+      "parent": "overview",
+      "target": {
+        "screen": "overview",
+        "state": "menu-open"
+      }
+    }
+  ]
+}

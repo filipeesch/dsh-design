@@ -3,6 +3,7 @@
  * project loader, agent tools, and the browser renderer.
  */
 
+import type { CssBlock } from './stylesheets.ts'
 import type { PreviewMetadata } from './preview.ts'
 
 /** One configured breakpoint name, such as `mobile` or `desktop`. */
@@ -82,6 +83,8 @@ export interface DesignElement {
   readonly children: readonly DesignChild[]
   readonly source: SourceLocation
   readonly address: StructuralAddress
+  /** Validated shared declarations, in cascade order before node CSS. */
+  readonly classCss?: CssBlock
   /** Source position of each attribute, used for metadata diagnostics. */
   readonly propLocations?: Readonly<Record<string, SourceLocation>>
 }
@@ -95,6 +98,8 @@ export interface DesignScreenNode {
   readonly children: readonly DesignChild[]
   readonly source: SourceLocation
   readonly address: StructuralAddress
+  /** Validated shared declarations, in cascade order before node CSS. */
+  readonly classCss?: CssBlock
   /** Source position of each attribute, used for metadata diagnostics. */
   readonly propLocations?: Readonly<Record<string, SourceLocation>>
 }
@@ -169,6 +174,16 @@ export interface DesignConfig {
   readonly breakpoints: readonly Breakpoint[]
   /** Entry screen id, or undefined to use the alphabetically first screen. */
   readonly entry?: string
+  readonly themes?: Readonly<Record<string, string>>
+  readonly defaultTheme?: string
+  readonly stylesheets?: readonly string[]
+}
+
+/** The effective, typed token palette for one canvas. */
+export interface ResolvedTheme {
+  readonly name: string
+  readonly tokens: ResolvedTokens
+  readonly colorScheme?: 'light' | 'dark'
 }
 
 /** One branch of a variant group, with its validated projection state. */
@@ -195,6 +210,8 @@ export interface VariantProjectionSnapshot {
   readonly selection: Readonly<Record<string, string>>
   /** Fixture collections used to expand this snapshot. */
   readonly fixtures: FixtureCollections
+  /** Render diagnostics of this exact projection, without branch tags. */
+  readonly diagnostics: readonly Diagnostic[]
 }
 
 /** One validated variant group discovered in a screen source. */
@@ -214,6 +231,8 @@ export interface VariantGroupInfo {
 export interface ProjectScreen {
   readonly id: string
   readonly file: string
+  /** Shared source dependencies found in the screen document and its branches. */
+  readonly sourceDependencies?: readonly string[]
   /** Parsed tree when parsing produced a root. */
   readonly root?: DesignScreenNode
   readonly diagnostics: readonly Diagnostic[]
@@ -258,6 +277,15 @@ export interface DesignProject {
   readonly folder: string
   readonly config: DesignConfig
   readonly tokens: ResolvedTokens
+  /** Current validated palettes only, including base when its tokens are valid. */
+  readonly themes: Readonly<Record<string, ResolvedTheme>>
+  readonly defaultTheme: string
+  /** Preview-only recovery for still-declared palettes; never used by checks. */
+  readonly lastValidThemes: Readonly<Record<string, ResolvedTheme>>
+  /** Content identity of the source inventory, excluding render assets. */
+  readonly sourceIdentity: string
+  /** Present design-relative source paths in the current inventory. */
+  readonly sourceFiles: readonly string[]
   readonly screens: readonly ProjectScreen[]
   readonly diagnostics: readonly Diagnostic[]
   /** Alphabetically first screen id, used when config.entry is absent. */
@@ -288,9 +316,20 @@ export type FixtureCollections = Readonly<Record<string, FixtureCollection>>
 
 /** One journey action or assertion, in source order. */
 export type JourneyStep =
-  | { readonly kind: 'tap'; readonly target: string; readonly source: SourceLocation }
+  | {
+      readonly kind: 'tap'
+      readonly target: string
+      readonly part?: 'primary' | 'menu'
+      readonly source: SourceLocation
+    }
   | { readonly kind: 'type'; readonly target: string; readonly value: string; readonly source: SourceLocation }
-  | { readonly kind: 'choose'; readonly target: string; readonly value: string; readonly source: SourceLocation }
+  | {
+      readonly kind: 'choose'
+      readonly target: string
+      readonly part?: 'menu'
+      readonly value: string
+      readonly source: SourceLocation
+    }
   | { readonly kind: 'navigate'; readonly screen: string; readonly source: SourceLocation }
   | { readonly kind: 'expect-screen'; readonly screen: string; readonly source: SourceLocation }
   | {
@@ -310,6 +349,7 @@ export interface ParsedJourney {
     readonly start: string
     readonly state?: string
     readonly breakpoint?: string
+    readonly theme?: string
     readonly steps: readonly JourneyStep[]
     readonly source: SourceLocation
   }

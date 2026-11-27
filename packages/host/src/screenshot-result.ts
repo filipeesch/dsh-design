@@ -11,7 +11,7 @@ interface ImageRef {
 
 export type ToolContent = { type: 'text'; text: string } | { type: 'image'; attachment: ImageRef }
 
-type ServiceContext = {
+export type AttachmentServices = {
   get?(
     name: 'attachments',
   ): { saveImage?(input: { data: Buffer; mediaType: 'image/png' }): Promise<ImageRef> } | undefined
@@ -36,7 +36,7 @@ interface ImageExecution {
 
 /** Persist a DSH attachment only when the active route declares image input. */
 export async function screenshotAttachment(
-  ctx: ServiceContext,
+  ctx: AttachmentServices,
   exec: ImageExecution,
   data: Buffer,
 ): Promise<{ attachment: ImageRef; imageDelivery: 'inline' } | { imageDelivery: 'path-only'; imageFallback: string }> {

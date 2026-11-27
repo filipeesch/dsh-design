@@ -179,7 +179,7 @@ export function Text({ node, children }: DesignComponentProps) {
   const style: CSSProperties = {
     margin: 0,
     fontFamily: family ?? FONT,
-    color: color ?? TEXT,
+    color: color ?? 'var(--dsx-callout-copy, ' + TEXT + ')',
     fontSize: size ?? preset.fontSize,
     fontWeight: weight ?? String(preset.fontWeight),
     ...(align === undefined ? {} : { textAlign: align as CSSProperties['textAlign'] }),

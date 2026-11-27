@@ -95,7 +95,29 @@ function walkGroup(
   prefix: string[],
   inheritedType?: TokenType,
 ): void {
+  if (prefix.length > 32 || ctx.tokens.length >= 2048) {
+    ctx.diagnostics.push({
+      severity: 'error',
+      code: 'token-limit',
+      file: ctx.file,
+      line: 1,
+      column: 1,
+      message: 'Token definitions exceed the 32-level or 2048-token budget.',
+    })
+    return
+  }
   for (const [key, raw] of Object.entries(group)) {
+    if (ctx.tokens.length >= 2048) {
+      ctx.diagnostics.push({
+        severity: 'error',
+        code: 'token-limit',
+        file: ctx.file,
+        line: 1,
+        column: 1,
+        message: 'Token definitions exceed the 2048-token budget.',
+      })
+      break
+    }
     if (key === '$type' || key === '$description' || key === '$extensions' || key === '$value') continue
     const path = [...prefix, key]
     if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -141,6 +163,21 @@ function walkGroup(
         continue
       }
       const checked = checkTokenValue(type, record.$value)
+      if (
+        typeof checked === 'string' &&
+        !ALIAS.test(checked) &&
+        /[;{}<>\\@!]|\b(?:url|image-set|expression)\s*\(/i.test(checked)
+      ) {
+        ctx.diagnostics.push({
+          severity: 'error',
+          code: 'token-value-unsafe',
+          file: ctx.file,
+          line: 1,
+          column: 1,
+          message: 'Token "' + tokenPath + '" contains unsupported CSS syntax.',
+        })
+        continue
+      }
       if (checked === undefined) {
         ctx.diagnostics.push({
           severity: 'error',
@@ -171,9 +208,10 @@ function walkGroup(
 }
 
 /** Resolve aliases and type checks into final token values and CSS text. */
-export function resolveTokenValues(raw: readonly RawToken[], file: string): ResolvedTokens {
+export function resolveTokenValues(raw: readonly RawToken[], _file: string): ResolvedTokens {
   const byPath = new Map(raw.map((token) => [token.path, token]))
   const resolved = new Map<string, { value: string | number; type: TokenType }>()
+  const failed = new Set<string>()
   const diagnostics: Diagnostic[] = []
 
   const resolve = (
@@ -182,14 +220,17 @@ export function resolveTokenValues(raw: readonly RawToken[], file: string): Reso
   ): { value: string | number; type: TokenType } | undefined => {
     const done = resolved.get(token.path)
     if (done !== undefined) return done
-    if (stack.includes(token.path)) {
+    if (failed.has(token.path)) return undefined
+    if (stack.includes(token.path) || stack.length >= 64) {
+      const cycle = stack.includes(token.path)
+      failed.add(token.path)
       diagnostics.push({
         severity: 'error',
-        code: 'token-cycle',
-        file,
-        line: 1,
-        column: 1,
-        message: `Token alias cycle: ${[...stack, token.path].join(' -> ')}.`,
+        code: cycle ? 'token-cycle' : 'token-alias-limit',
+        ...token.source,
+        message: cycle
+          ? `Token alias cycle: ${[...stack, token.path].join(' -> ')}.`
+          : 'Token aliases may chain through at most 64 definitions.',
       })
       return undefined
     }
@@ -200,9 +241,7 @@ export function resolveTokenValues(raw: readonly RawToken[], file: string): Reso
         diagnostics.push({
           severity: 'error',
           code: 'token-value-type',
-          file,
-          line: 1,
-          column: 1,
+          ...token.source,
           message: `Token "${token.path}" has a value that is not a valid ${token.type}.`,
         })
         return undefined
@@ -217,9 +256,7 @@ export function resolveTokenValues(raw: readonly RawToken[], file: string): Reso
       diagnostics.push({
         severity: 'error',
         code: 'token-alias-missing',
-        file,
-        line: 1,
-        column: 1,
+        ...token.source,
         message: `Token "${token.path}" aliases "${targetPath}", which does not exist.`,
         ...(nearest(targetPath, [...byPath.keys()]) === undefined
           ? {}
@@ -228,14 +265,15 @@ export function resolveTokenValues(raw: readonly RawToken[], file: string): Reso
       return undefined
     }
     const resolvedTarget = resolve(target, [...stack, token.path])
-    if (resolvedTarget === undefined) return undefined
+    if (resolvedTarget === undefined) {
+      failed.add(token.path)
+      return undefined
+    }
     if (resolvedTarget.type !== token.type) {
       diagnostics.push({
         severity: 'error',
         code: 'token-alias-type',
-        file,
-        line: 1,
-        column: 1,
+        ...token.source,
         message: `Token "${token.path}" is ${token.type} but its alias "${targetPath}" is ${resolvedTarget.type}.`,
       })
       return undefined
@@ -245,7 +283,7 @@ export function resolveTokenValues(raw: readonly RawToken[], file: string): Reso
     return result
   }
 
-  const tokens: Record<string, ResolvedToken> = {}
+  const tokens: Record<string, ResolvedToken> = Object.create(null) as Record<string, ResolvedToken>
   for (const token of raw) {
     const value = resolve(token, [])
     if (value === undefined) continue
@@ -262,14 +300,21 @@ export function resolveTokenValues(raw: readonly RawToken[], file: string): Reso
  * @param source - JSON text.
  * @param file - project-relative path used in diagnostics.
  */
-export function parseTokens(source: string, file: string): ResolvedTokens {
+export function parseRawTokens(
+  source: string,
+  file: string,
+  theme = false,
+): {
+  raw: RawToken[]
+  diagnostics: Diagnostic[]
+  colorScheme?: 'light' | 'dark'
+} {
   let document: unknown
   try {
     document = JSON.parse(source)
   } catch (error) {
     return {
-      tokens: {},
-      cssText: '',
+      raw: [] as RawToken[],
       diagnostics: [
         {
           severity: 'error',
@@ -277,29 +322,58 @@ export function parseTokens(source: string, file: string): ResolvedTokens {
           file,
           line: 1,
           column: 1,
-          message: `tokens.json is not valid JSON: ${(error as Error).message}`,
+          message: `${file} is not valid JSON: ${(error as Error).message}`,
         },
       ],
     }
   }
-  if (document === null || typeof document !== 'object' || Array.isArray(document)) {
-    return {
-      tokens: {},
-      cssText: '',
-      diagnostics: [
-        {
-          severity: 'error',
-          code: 'tokens-shape',
-          file,
-          line: 1,
-          column: 1,
-          message: 'tokens.json must be an object of token groups.',
-        },
-      ],
-    }
+  const diagnostic = (code: string, message: string): Diagnostic => ({
+    severity: 'error',
+    code,
+    file,
+    line: 1,
+    column: 1,
+    message,
+  })
+  const record = (value: unknown): value is Record<string, unknown> =>
+    value !== null && typeof value === 'object' && !Array.isArray(value)
+  if (!record(document)) {
+    return { raw: [] as RawToken[], diagnostics: [diagnostic('tokens-shape', file + ' must be an object.')] }
   }
   const ctx: WalkContext = { file, tokens: [], diagnostics: [] }
-  walkGroup(ctx, document as Record<string, unknown>, [])
-  const resolved = resolveTokenValues(ctx.tokens, file)
-  return { ...resolved, diagnostics: [...ctx.diagnostics, ...resolved.diagnostics] }
+  let colorScheme: 'light' | 'dark' | undefined
+  let definitions = document
+  if (theme) {
+    if (document.colorScheme === 'light' || document.colorScheme === 'dark') colorScheme = document.colorScheme
+    else if (document.colorScheme !== undefined) {
+      ctx.diagnostics.push(diagnostic('theme-color-scheme', 'Theme colorScheme must be "light" or "dark".'))
+    }
+    if (Object.keys(document).some((key) => key !== 'colorScheme' && key !== 'tokens') || !record(document.tokens)) {
+      ctx.diagnostics.push(diagnostic('theme-shape', 'A theme file requires a tokens object and optional colorScheme.'))
+      return { raw: ctx.tokens, diagnostics: ctx.diagnostics, colorScheme }
+    }
+    definitions = document.tokens
+  }
+  walkGroup(ctx, definitions, [])
+  const names = new Set<string>()
+  const vars = new Set<string>()
+  const raw = ctx.tokens.filter((token) => {
+    const variable = cssVariableFor(token.path)
+    if (names.has(token.path) || vars.has(variable)) {
+      ctx.diagnostics.push(
+        diagnostic('token-name-conflict', 'Token "' + token.path + '" repeats a token path or CSS variable.'),
+      )
+      return false
+    }
+    names.add(token.path)
+    vars.add(variable)
+    return true
+  })
+  return { raw, diagnostics: ctx.diagnostics, colorScheme }
+}
+
+export function parseTokens(source: string, file: string): ResolvedTokens {
+  const parsed = parseRawTokens(source, file)
+  const resolved = resolveTokenValues(parsed.raw, file)
+  return { ...resolved, diagnostics: [...parsed.diagnostics, ...resolved.diagnostics] }
 }

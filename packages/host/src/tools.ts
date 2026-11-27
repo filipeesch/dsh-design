@@ -1,43 +1,49 @@
 /**
- * Design-session plugin (mounted by the `design` preset): the five model
+ * Design-session plugin (mounted by the `design` preset): model
  * tools plus automatic validation of every call that changed design files.
  */
 import { randomUUID } from 'node:crypto'
-import { realpath } from 'node:fs/promises'
-import { relative, sep } from 'node:path'
 import {
   countDiagnostics,
   designPrompt,
-  handoffPrompt,
   formatDiagnostic,
-  loadProject,
   projectScreen,
-  resolveHandoffPlan,
   scaffoldProject,
-  sortDiagnostics,
-  HandoffSelectionError,
   type DesignProject,
-  type Diagnostic,
 } from '@filipeesch/dsh-design-core'
-import { KIT_VERSION, componentNames, kitMetadata } from '@filipeesch/dsh-design-kit/meta'
-import { BrowserSessions } from './browser.ts'
-import { DesignBrowserError } from './browser.ts'
-import { PackageError } from './cache.ts'
+import { KIT_VERSION, componentNames } from '@filipeesch/dsh-design-kit/meta'
+import { designBrowserErrorCode } from './browser.ts'
+import { runningDesignBuild, type BuildIdentity } from './build-identity.ts'
+import { validateScope, type ValidationArgs, type ValidationResult } from './validation-scope.ts'
+import type { DesignService } from './index.ts'
+import { tool, type ToolExecution } from './tool-adapter.ts'
 import { catalogOutputSchema, designCatalog, formatCatalog, MAX_CATALOG_NAMES } from './catalog.ts'
 import {
   captureScreenshot,
   measureSelection,
+  defaultBreakpoint,
   resolveCheckSelection,
+  resolveJourneyStart,
   runJourney,
+  runGeometry,
+  type GeometryCase,
+  type GeometryResult,
+  type JourneyResult,
+  type LintResult,
+  type ScreenshotResult,
   runLint,
   type CheckContext,
 } from './checks.ts'
 import type { MediaDiagnostic } from './deterministic.ts'
-import { screenshotAttachment, type ToolContent } from './screenshot-result.ts'
-import { HandoffError, runHandoff } from './handoff.ts'
-import { queryDesign } from './query.ts'
+import { screenshotAttachment, type ToolContent, type AttachmentServices } from './screenshot-result.ts'
+import { queryDesign, type QueryOptions } from './query.ts'
 import { diffGitRevisions, diffVariantBranches, formatDesignDiff } from './diff.ts'
-import { compatibleState, resolveScreenProjection } from './projection.ts'
+import {
+  compatibleState,
+  hasCurrentProjection,
+  requireCurrentProjection,
+  resolveScreenProjection,
+} from './projection.ts'
 import { summarizeDiagnosticDelta } from './diagnostic-delta.ts'
 import { changedFiles, fingerprintFolder } from './runtime.ts'
 
@@ -45,91 +51,6 @@ import { changedFiles, fingerprintFolder } from './runtime.ts'
 export const name = 'design-tools'
 /** Required services: the tool registry, the design host, and prompt sections. */
 export const inject = ['tools', 'design', 'systemPrompt']
-
-interface ParameterSpec {
-  type?: 'string' | 'number' | 'boolean' | 'array'
-  items?: 'string'
-  enum?: readonly string[]
-  description?: string
-  required?: boolean
-}
-
-interface ToolOptions {
-  name: string
-  description: string
-  parameters: Record<string, ParameterSpec>
-  output: { schema: Record<string, unknown>; render: (args: any, value: any) => ToolContent[] }
-  execute: (args: any, exec: any) => Promise<unknown>
-}
-
-/** Move property-level `required: true` flags to JSON-Schema root required arrays. */
-function toJsonSchema(node: any): any {
-  if (node === null || typeof node !== 'object' || Array.isArray(node)) return node
-  if (node.type === 'object' && node.properties !== null && typeof node.properties === 'object') {
-    const properties: Record<string, unknown> = {}
-    const required: string[] = []
-    for (const [name, property] of Object.entries(node.properties as Record<string, any>)) {
-      const { required: isRequired, ...rest } = property
-      properties[name] = toJsonSchema(rest)
-      if (isRequired === true) required.push(name)
-    }
-    return { ...node, properties, ...(required.length === 0 ? {} : { required }) }
-  }
-  if (node.type === 'array' && node.items !== undefined) return { ...node, items: toJsonSchema(node.items) }
-  return node
-}
-
-/** Build a registry-ready tool definition without importing the DSH tool helper. */
-function tool(options: ToolOptions): Record<string, unknown> {
-  const properties: Record<string, unknown> = {}
-  const required: string[] = []
-  for (const [name, spec] of Object.entries(options.parameters)) {
-    properties[name] = {
-      ...(spec.type === undefined ? {} : { type: spec.type }),
-      ...(spec.type === 'array' ? { items: { type: spec.items ?? 'string' } } : {}),
-      ...(spec.enum === undefined ? {} : { enum: [...spec.enum] }),
-      ...(spec.description === undefined ? {} : { description: spec.description }),
-    }
-    if (spec.required === true) required.push(name)
-  }
-  const parameters = {
-    type: 'object',
-    properties,
-    ...(required.length === 0 ? {} : { required }),
-    additionalProperties: false,
-  }
-  return {
-    name: options.name,
-    description: options.description,
-    parameters,
-    output: { ...options.output, schema: toJsonSchema(options.output.schema) },
-    async execute(args: unknown, exec: any): Promise<unknown> {
-      if (args === null || typeof args !== 'object' || Array.isArray(args))
-        throw new Error(options.name + ': arguments must be an object')
-      const record = args as Record<string, unknown>
-      for (const name of Object.keys(record)) {
-        if (!Object.hasOwn(options.parameters, name))
-          throw new Error(options.name + ': unknown argument "' + name + '"')
-      }
-      for (const [name, spec] of Object.entries(options.parameters)) {
-        const value = record[name]
-        if (value === undefined) {
-          if (spec.required === true) throw new Error(options.name + ': missing required argument "' + name + '"')
-          continue
-        }
-        if (spec.type === 'array') {
-          if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string'))
-            throw new Error(options.name + ': argument "' + name + '" must be an array of strings')
-        } else if (spec.type !== undefined && typeof value !== spec.type) {
-          throw new Error(options.name + ': argument "' + name + '" must be a ' + spec.type)
-        }
-        if (spec.enum !== undefined && !spec.enum.includes(String(value)))
-          throw new Error(options.name + ': argument "' + name + '" must be one of ' + spec.enum.join(', '))
-      }
-      return options.execute(record, exec)
-    },
-  }
-}
 
 /** One model-facing validation notice. */
 function userMessage(text: string): unknown {
@@ -147,68 +68,41 @@ interface SessionFacts {
 }
 
 /** Build the services one headless check needs for a calling session. */
-function checkContext(ctx: any, exec: any): CheckContext {
-  const facts = sessionFacts(ctx, exec)
+function checkContext(ctx: ToolContext, exec: ToolExecution, facts: SessionFacts): CheckContext {
   return {
     sessionId: facts.sessionId,
-    browsers: ctx.design.browsers as BrowserSessions,
-    assetsDir: ctx.design.assetsDir as string,
-    ...(exec.signal === undefined ? {} : { signal: exec.signal as AbortSignal }),
-    ...(ctx.design.browserTimeoutMs === undefined ? {} : { timeoutMs: ctx.design.browserTimeoutMs as number }),
+    browsers: ctx.design.browsers,
+    assetsDir: ctx.design.assetsDir,
+    ...(exec.signal === undefined ? {} : { signal: exec.signal }),
+    ...(ctx.design.browserTimeoutMs === undefined ? {} : { timeoutMs: ctx.design.browserTimeoutMs }),
   }
 }
 
 /** Resolve the calling session and its working directory. */
-function sessionFacts(ctx: any, exec: any): SessionFacts {
+function registryOf(ctx: ToolContext): NonNullable<DesignService['registry']> {
+  if (ctx.design.registry === undefined) throw new Error('The design project registry is not active.')
+  return ctx.design.registry
+}
+
+function sessionFacts(ctx: ToolContext, exec: ToolExecution): SessionFacts {
   const session = exec.agent?.session
   if (session === undefined) throw new Error('design tools require a calling agent session')
-  const effective = ctx.design.resolveSessionCwd(session.id) as string | undefined
+  const effective = ctx.design.resolveSessionCwd(session.id)
   if (effective === undefined) throw new Error('the calling session has no working directory')
-  ctx.design.registry.learnSession(session.id, effective)
+  registryOf(ctx).learnSession(session.id, effective)
   return { sessionId: session.id, cwd: effective }
 }
 
 /** Load the project for a session from disk. */
 async function loadForSession(
-  ctx: any,
-  exec: any,
+  ctx: ToolContext,
+  exec: ToolExecution,
 ): Promise<{ facts: SessionFacts; folder: string; project: DesignProject }> {
   const facts = sessionFacts(ctx, exec)
-  const folder = ctx.design.folderForCwd(facts.cwd) as string
-  // Reuse the live runtime so last-valid variant metadata and diagnostics are
-  // visible to tools. Current checks never read a stale projection as current.
-  const runtime = await ctx.design.registry?.forSession(facts.sessionId)
-  const previous = runtime === undefined ? undefined : await runtime.get()
-  const project = await loadProject({
-    folder,
-    kit: kitMetadata,
-    installedKitVersion: KIT_VERSION,
-    ...(previous === undefined ? {} : { previous }),
-  })
+  const folder = ctx.design.folderForCwd(facts.cwd)
+  // Read current sources, sharing the parser cache without accepting retained render output.
+  const project = await registryOf(ctx).forFolder(folder).readCurrent()
   return { facts, folder, project }
-}
-
-/** Read screen diagnostics for a design_validate scope. */
-function scopedDiagnostics(project: DesignProject, scope: string, file?: string, screen?: string): Diagnostic[] {
-  if (scope === 'file') {
-    const target = file ?? ''
-    return sortDiagnostics(
-      project.diagnostics.filter(
-        (diagnostic) =>
-          diagnostic.file === target ||
-          (diagnostic.file === 'tokens.json' && target !== 'design.json') ||
-          (diagnostic.file === 'design.json' && target === 'design.json'),
-      ),
-    )
-  }
-  if (scope === 'screen') {
-    const screenFile = project.screens.find((candidate) => candidate.id === screen)?.file
-    if (screenFile === undefined) return []
-    return sortDiagnostics(
-      project.diagnostics.filter((diagnostic) => diagnostic.file === screenFile || diagnostic.file === 'tokens.json'),
-    )
-  }
-  return sortDiagnostics(project.diagnostics)
 }
 
 /** Tool output renderer. */
@@ -230,6 +124,8 @@ function usableStates(screen: DesignProject['screens'][number]): string[] {
 function selectionLabel(value: {
   screen: string
   state?: string
+  theme?: string
+  breakpoint?: string
   variant?: { path: string; branch: string }
   selection?: Record<string, string>
 }): string {
@@ -239,6 +135,8 @@ function selectionLabel(value: {
     JSON.stringify(value.screen) +
     ' state=' +
     (value.state === undefined ? '(default)' : JSON.stringify(value.state)) +
+    (value.breakpoint === undefined ? '' : ' breakpoint=' + JSON.stringify(value.breakpoint)) +
+    (value.theme === undefined ? '' : ' theme=' + JSON.stringify(value.theme)) +
     ' variant=' +
     (value.variant === undefined ? '(chosen)' : JSON.stringify(value.variant.path + ':' + value.variant.branch)) +
     (branches.length === 0 ? '' : ' [' + branches.join(', ') + ']')
@@ -276,20 +174,163 @@ function formatMedia(media: readonly MediaDiagnostic[]): string {
   )
 }
 
+const stringSchema = { type: 'string' }
+const numberField = { type: 'number', required: true }
+const stringField = { type: 'string', required: true }
+const stringsSchema = { type: 'array', items: stringSchema }
+const recordSchema = { type: 'object', additionalProperties: true, properties: {} }
+const object = (properties: Record<string, unknown>) => ({ type: 'object', properties, additionalProperties: false })
+const variantSchema = object({
+  group: stringField,
+  path: stringField,
+  branch: stringField,
+  chosen: { type: 'boolean', required: true },
+  selection: recordSchema,
+})
+const buildSchema = object({ id: stringField, version: stringSchema })
+const journeySelectorSchema = object({
+  id: stringField,
+  file: stringField,
+  usable: { type: 'boolean', required: true },
+  screen: stringSchema,
+  breakpoint: stringSchema,
+  state: stringSchema,
+  theme: stringSchema,
+  reason: stringSchema,
+})
+const failureProperties = { error: stringSchema, errorCode: stringSchema }
+const failSchema = object({ error: stringField, errorCode: stringField })
+function journeyStatus(project: DesignProject, { id, file, journey, diagnostics }: DesignProject['journeys'][number]) {
+  const entry = { id, file }
+  const first = diagnostics.find((item) => item.severity === 'error')
+  if (journey === undefined)
+    return { ...entry, usable: false, reason: first === undefined ? 'No valid journey.' : formatDiagnostic(first) }
+  const coordinates = {
+    screen: journey.start,
+    ...(journey.state === undefined ? {} : { state: journey.state }),
+    ...(project.config.breakpoints.length === 0 && journey.breakpoint === undefined
+      ? {}
+      : { breakpoint: journey.breakpoint ?? defaultBreakpoint(project) }),
+    theme: journey.theme ?? project.defaultTheme,
+  }
+  if (first !== undefined) return { ...entry, ...coordinates, usable: false, reason: formatDiagnostic(first) }
+  try {
+    resolveJourneyStart(project, journey)
+    return { ...entry, ...coordinates, usable: true }
+  } catch (error) {
+    return { ...entry, ...coordinates, usable: false, reason: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+function buildLabel(build: BuildIdentity): string {
+  return build.version === undefined ? build.id : build.version + ' (' + build.id + ')'
+}
+function checkFailure(error: unknown) {
+  return {
+    errorCode: designBrowserErrorCode(error) ?? 'invalid-selection',
+    error: error instanceof Error ? error.message : String(error),
+  }
+}
+type CheckFailure = ReturnType<typeof checkFailure>
+interface CheckArgs {
+  screen: string
+  state?: string
+  breakpoint?: string
+  variant?: string
+  theme?: string
+  highlight?: string
+}
+function formatFailure(value: { errorCode?: string; error: string }) {
+  return (value.errorCode === undefined ? '' : value.errorCode + ': ') + value.error
+}
+const reviewSchema = object({
+  screen: stringSchema,
+  selection: stringSchema,
+  theme: stringSchema,
+  open: stringsSchema,
+  tabs: recordSchema,
+  disclosures: recordSchema,
+})
+const geometryCaseSchema = object({
+  breakpoint: stringField,
+  state: stringSchema,
+  theme: stringSchema,
+  reviewContext: reviewSchema,
+})
+const boxSchema = object({ x: numberField, y: numberField, width: numberField, height: numberField })
+interface ViewArgs {
+  screen?: string
+  node?: string
+  depth?: number
+  open?: boolean
+  state?: string
+  variant?: string
+  breakpoint?: string
+  theme?: string
+  mode?: 'geometry'
+  nodes?: readonly string[]
+  cases?: readonly GeometryCase[]
+}
+function formatGeometry(value: GeometryResult): string {
+  return [
+    selectionLabel(value),
+    'Current source: ' + value.sourceIdentity,
+    ...value.cases.map((item) =>
+      [
+        selectionLabel({
+          ...item,
+          screen: value.screen,
+          ...(value.variant === undefined ? {} : { variant: value.variant }),
+        }) + (item.reviewContext ? ' (temporary review context)' : ''),
+        ...item.nodes.map(
+          (node) =>
+            '  ' +
+            node.id +
+            ': ' +
+            (node.status === 'visible'
+              ? node.box.x + ',' + node.box.y + ' ' + node.box.width + 'x' + node.box.height
+              : node.status),
+        ),
+        formatMedia(item.media),
+      ]
+        .filter(Boolean)
+        .join('\n'),
+    ),
+  ].join('\n')
+}
+
 const mediaSchema = { type: 'array', items: { type: 'object', additionalProperties: true, properties: {} } }
+const geometryMeasurementSchema = object({
+  breakpoint: stringField,
+  state: stringSchema,
+  theme: stringField,
+  rendition: stringField,
+  reviewContext: { type: 'boolean' },
+  canvas: object({ width: numberField, height: numberField }),
+  nodes: {
+    type: 'array',
+    required: true,
+    items: object({
+      id: stringField,
+      status: { type: 'string', required: true, enum: ['visible', 'hidden', 'absent'] },
+      box: boxSchema,
+    }),
+  },
+  media: { ...mediaSchema, required: true },
+})
 const selectionSchema = { type: 'object', additionalProperties: true, properties: {} }
 
-/** Project-relative path with forward slashes for tool results and artifacts. */
-async function projectPath(cwd: string, folder: string, absolute: string): Promise<string> {
-  const realCwd = await realpath(cwd)
-  const realFolder = await realpath(folder)
-  const design = relative(realCwd, realFolder).split(sep).join('/')
-  const inside = relative(realFolder, absolute).split(sep).join('/')
-  return design + '/' + inside
+interface ToolContext extends AttachmentServices {
+  readonly design: DesignService
+  readonly tools: { register(definition: Record<string, unknown>): void }
+  readonly systemPrompt: {
+    section(definition: { name: string; order: number; text: string; interpolate: boolean }): void
+  }
+  on(event: string, handler: (...args: any[]) => unknown): void
 }
 
 /** Register the design tools and automatic validation. */
-export function apply(ctx: any): void {
+export function apply(ctx: ToolContext): void {
   const editReports = new Map<symbol, string>()
 
   ctx.systemPrompt.section({
@@ -298,22 +339,22 @@ export function apply(ctx: any): void {
     text: designPrompt(componentNames),
     interpolate: false,
   })
-  ctx.systemPrompt.section({
-    name: 'design:handoff',
-    order: 710,
-    text: handoffPrompt(),
-    interpolate: false,
-  })
 
   ctx.on('tools/execute', async (exec: any, next: () => Promise<any>) => {
     // The enclosing call brackets all nested writes, including edits undone before it returns.
     const session = exec.agent?.session
-    if (session === undefined || exec.parent !== undefined) return next()
-    const cwd = ctx.design.resolveSessionCwd(session.id) as string | undefined
+    if (
+      session === undefined ||
+      exec.parent !== undefined ||
+      (typeof exec.name === 'string' && exec.name.startsWith('design_'))
+    )
+      return next()
+    const cwd = ctx.design.resolveSessionCwd(session.id)
     if (cwd === undefined) return next()
-    const folder = ctx.design.folderForCwd(cwd) as string
-    ctx.design.registry.learnSession(session.id, cwd)
-    const readProject = () => loadProject({ folder, kit: kitMetadata, installedKitVersion: KIT_VERSION })
+    const folder = ctx.design.folderForCwd(cwd)
+    registryOf(ctx).learnSession(session.id, cwd)
+    const runtime = registryOf(ctx).forFolder(folder)
+    const readProject = () => runtime.readCurrent()
     const before = await fingerprintFolder(folder).catch(() => undefined)
     if (before === undefined) return next()
     const beforeProject = await readProject().catch(() => undefined)
@@ -327,7 +368,7 @@ export function apply(ctx: any): void {
         : summarizeDiagnosticDelta(beforeProject.diagnostics, afterProject.diagnostics)
     if (report !== undefined) editReports.set(exec.token, report)
     try {
-      await ctx.design.registry.forFolder(folder).reload()
+      await registryOf(ctx).forFolder(folder).reload()
     } catch {
       // Leave preview recovery to its watcher; validation has already read current source.
     }
@@ -372,9 +413,9 @@ export function apply(ctx: any): void {
       },
       async execute(_args: unknown, exec: any) {
         const facts = sessionFacts(ctx, exec)
-        const folderName = ctx.design.folderName as string
+        const folderName = ctx.design.folderName
         const result = await scaffoldProject(facts.cwd, { folderName, kitVersion: KIT_VERSION })
-        await ctx.design.registry
+        await registryOf(ctx)
           .forFolder(result.folder)
           .reload()
           .catch(() => undefined)
@@ -393,7 +434,7 @@ export function apply(ctx: any): void {
     tool({
       name: 'design_status',
       description:
-        'Report project selectors, kit versions, diagnostic counts, preview URL, and browser readiness without launching Chromium.',
+        'Discover screens, states, breakpoints, themes and journey IDs; report the active build, kit versions, and Chromium readiness without launching it.',
       parameters: {},
       output: {
         schema: {
@@ -404,6 +445,11 @@ export function apply(ctx: any): void {
             folder: { type: 'string', required: true },
             previewUrl: { type: 'string', required: true },
             kitVersion: { type: 'string' },
+            activeBuild: buildSchema,
+            toolsBuild: buildSchema,
+            themes: { type: 'array', required: true, items: { type: 'string' } },
+            defaultTheme: { type: 'string' },
+            journeys: { type: 'array', required: true, items: journeySelectorSchema },
             installedKitVersion: { type: 'string', required: true },
             entry: { type: 'string' },
             breakpoints: { type: 'array', items: { type: 'object', additionalProperties: true, properties: {} } },
@@ -453,7 +499,28 @@ export function apply(ctx: any): void {
                     .join(', ') || '(none)'),
               ]
             : [value.message]
+          lines.push('Active plugin build: ' + buildLabel(value.activeBuild))
+          if (value.toolsBuild !== undefined)
+            lines.push(
+              'Tools build differs from host: ' +
+                buildLabel(value.toolsBuild) +
+                '. Host and session may need a restart after an update.',
+            )
           lines.push('Preview: ' + value.previewUrl)
+          if (value.themes.length > 0)
+            lines.push('Themes: ' + value.themes.join(', ') + '; default: ' + value.defaultTheme)
+          for (const journey of value.journeys) {
+            lines.push(
+              '  journey=' +
+                JSON.stringify(journey.id) +
+                ' (' +
+                journey.file +
+                '): ' +
+                (journey.usable ? 'usable' : 'blocked') +
+                (journey.screen === undefined ? '' : ' ' + selectionLabel({ ...journey, screen: journey.screen })) +
+                (journey.reason === undefined ? '' : ' — ' + journey.reason),
+            )
+          }
           for (const screen of value.screens) {
             lines.push(
               '  screen=' +
@@ -498,6 +565,11 @@ export function apply(ctx: any): void {
           exists,
           folder,
           previewUrl: ctx.design.previewUrl(facts.sessionId),
+          activeBuild: ctx.design.build,
+          ...(ctx.design.build.id === runningDesignBuild.id ? {} : { toolsBuild: runningDesignBuild }),
+          themes: exists ? Object.keys(project.themes).sort() : [],
+          ...(exists ? { defaultTheme: project.defaultTheme } : {}),
+          journeys: project.journeys.map((entry) => journeyStatus(project, entry)),
           installedKitVersion: KIT_VERSION,
           breakpoints: exists ? project.config.breakpoints : [],
           browser: ctx.design.browsers.readiness(),
@@ -557,14 +629,14 @@ export function apply(ctx: any): void {
     tool({
       name: 'design_validate',
       description:
-        'Validate the whole design project, one file, or one screen, returning ordered diagnostics with suggestions.',
+        'Check authored source and return diagnostics. Omit arguments for the whole project, or pass only file or screen. Conflicting or missing targets are errors.',
       parameters: {
         scope: {
           type: 'string',
           enum: ['project', 'file', 'screen'],
-          description: 'Validation scope; defaults to project.',
+          description: 'Optional explicit scope; inferred from file or screen when omitted.',
         },
-        file: { type: 'string', description: 'Project-relative file for file scope, for example screens/home.dsx.' },
+        file: { type: 'string', description: 'Design-folder-relative source path, for example screens/home.dsx.' },
         screen: { type: 'string', description: 'Screen id for screen scope.' },
       },
       output: {
@@ -573,6 +645,7 @@ export function apply(ctx: any): void {
           additionalProperties: false,
           properties: {
             scope: { type: 'string', required: true },
+            ...failureProperties,
             diagnostics: {
               type: 'array',
               required: true,
@@ -582,23 +655,22 @@ export function apply(ctx: any): void {
             warnings: { type: 'number', required: true },
           },
         },
-        render: (_args: unknown, value: any) =>
+        render: (_args: unknown, value: ValidationResult) =>
           text(
-            value.diagnostics.length === 0
-              ? 'No diagnostics in the ' + value.scope + ' scope.'
-              : String(value.errors) +
+            'error' in value
+              ? formatFailure(value)
+              : value.diagnostics.length === 0
+                ? 'No diagnostics in the ' + value.scope + ' scope.'
+                : String(value.errors) +
                   ' error(s), ' +
                   String(value.warnings) +
                   ' warning(s):\n' +
                   value.diagnostics.map(formatDiagnostic).join('\n'),
           ),
       },
-      async execute(args: any, exec: any) {
+      async execute(args: ValidationArgs, exec: ToolExecution) {
         const { project } = await loadForSession(ctx, exec)
-        const scope = args.scope ?? 'project'
-        const diagnostics = scopedDiagnostics(project, scope, args.file, args.screen)
-        const counts = countDiagnostics(diagnostics)
-        return { scope, diagnostics, errors: counts.errors, warnings: counts.warnings }
+        return validateScope(project, args)
       },
     }),
   )
@@ -607,8 +679,28 @@ export function apply(ctx: any): void {
     tool({
       name: 'design_view',
       description:
-        'Return a compact indented text projection of a screen, optionally one subtree, a named state, and a measured layout snapshot at one breakpoint.',
+        'Inspect the authored tree, or measure rendered layout with Chromium. For focused comparisons use mode=geometry, nodes, and cases; no images or tree in that mode.',
       parameters: {
+        mode: {
+          type: 'string',
+          enum: ['geometry'],
+          description: 'Measure exact node IDs across 1–6 cases. Requires nodes and cases.',
+        },
+        nodes: {
+          type: 'array',
+          items: 'string',
+          description: '1–24 distinct stable node IDs (not globs), in result order.',
+        },
+        cases: {
+          type: 'array',
+          schema: { items: geometryCaseSchema },
+          description:
+            '1–6 explicit cases with breakpoint and optional state, theme, and reviewContext. Scope screen and variant at the top level.',
+        },
+        theme: {
+          type: 'string',
+          description: 'An explicit palette for single-case view; use cases[].theme for geometry mode.',
+        },
         screen: { type: 'string', description: 'Screen id; defaults to the project entry screen.' },
         node: { type: 'string', description: 'Node id to project only that subtree.' },
         depth: { type: 'number', description: 'Maximum node depth.' },
@@ -629,12 +721,15 @@ export function apply(ctx: any): void {
           additionalProperties: false,
           properties: {
             screen: { type: 'string', required: true },
-            text: { type: 'string', required: true },
+            text: stringSchema,
+            theme: stringSchema,
+            sourceIdentity: stringSchema,
+            cases: { type: 'array', items: geometryMeasurementSchema },
             node: { type: 'string' },
             error: { type: 'string' },
             errorCode: { type: 'string' },
             state: { type: 'string' },
-            variant: { type: 'object', additionalProperties: true, properties: {} },
+            variant: variantSchema,
             breakpoint: { type: 'string' },
             selection: selectionSchema,
             media: mediaSchema,
@@ -643,7 +738,8 @@ export function apply(ctx: any): void {
           },
         },
         render: (_args: unknown, value: any) => {
-          if (value.error !== undefined) return text(value.error)
+          if (value.error !== undefined) return text(formatFailure(value))
+          if (value.cases !== undefined) return text(formatGeometry(value))
           if (value.layout === undefined) return text(selectionLabel(value) + '\n' + value.text)
           return text(
             selectionLabel(value) +
@@ -678,11 +774,32 @@ export function apply(ctx: any): void {
           )
         },
       },
-      async execute(args: any, exec: any) {
-        const { project } = await loadForSession(ctx, exec)
+      async execute(args: ViewArgs, exec: ToolExecution) {
+        const { facts, project } = await loadForSession(ctx, exec)
         const available = project.screens.filter((screen) => screen.id !== '').map((screen) => screen.id)
         const screenId = args.screen ?? project.entry ?? ''
         try {
+          if (args.mode === 'geometry') {
+            if (args.nodes === undefined || args.cases === undefined)
+              throw new Error('Geometry mode requires nodes and cases.')
+            if (
+              [args.node, args.depth, args.open, args.state, args.breakpoint, args.theme].some(
+                (arg) => arg !== undefined,
+              )
+            )
+              throw new Error(
+                'Geometry mode accepts state, breakpoint and theme only inside cases; omit node, depth and open.',
+              )
+            return await runGeometry(checkContext(ctx, exec, facts), project, screenId, {
+              nodes: args.nodes,
+              cases: args.cases,
+              ...(args.variant === undefined ? {} : { variant: args.variant }),
+            })
+          }
+          if (args.nodes !== undefined || args.cases !== undefined)
+            throw new Error('Use mode="geometry" with nodes and cases.')
+          if (args.depth !== undefined && (!Number.isInteger(args.depth) || args.depth < 0 || args.depth > 40))
+            throw new Error('Depth must be an integer from 0 to 40.')
           const selected = resolveCheckSelection(
             project,
             screenId,
@@ -703,24 +820,27 @@ export function apply(ctx: any): void {
             screen: screenId,
             text: view.text,
             selection,
+            theme: selected.theme,
             ...(view.node === undefined ? {} : { node: view.node }),
             ...(named === undefined ? {} : { state: named.name }),
             ...(variant === undefined ? {} : { variant }),
           }
-          if (args.breakpoint === undefined) return base
           if (args.node !== undefined && view.node === undefined) throw new Error('Unknown node "' + args.node + '".')
+          if (args.breakpoint === undefined) return base
           return {
             ...base,
             breakpoint: args.breakpoint,
-            ...(await measureSelection(checkContext(ctx, exec), project, selected)),
+            ...(await measureSelection(checkContext(ctx, exec, facts), project, selected, {
+              ...(args.node === undefined ? {} : { node: args.node }),
+              ...(args.depth === undefined ? {} : { depth: args.depth }),
+            })),
           }
         } catch (error) {
           return {
             screen: screenId,
             text: '',
             screens: available,
-            error: error instanceof Error ? error.message : String(error),
-            errorCode: error instanceof DesignBrowserError ? error.code : 'invalid-selection',
+            ...checkFailure(error),
           }
         }
       },
@@ -731,9 +851,13 @@ export function apply(ctx: any): void {
     tool({
       name: 'design_catalog',
       description:
-        'Index kit components, DSX constructs, and composition recipes, or look up details with props and validated examples. Batch related names in one call.',
+        'Find kit components, DSX constructs, and recipes by intent in Portuguese or English. Pass only query, name, or names; no arguments lists the index.',
       parameters: {
-        name: { type: 'string', description: 'One exact catalog name. Omit name and names for the index.' },
+        query: {
+          type: 'string',
+          description: 'Search by intent in Portuguese or English (1–160 characters); omit name and names.',
+        },
+        name: { type: 'string', description: 'One exact catalog name; omit query and names.' },
         names: {
           type: 'array',
           items: 'string',
@@ -763,25 +887,32 @@ export function apply(ctx: any): void {
       },
       output: {
         schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            journey: { type: 'string', required: true },
-            screen: { type: 'string', required: true },
-            state: { type: 'string' },
-            breakpoint: { type: 'string', required: true },
-            ok: { type: 'boolean', required: true },
-            steps: {
-              type: 'array',
-              required: true,
-              items: { type: 'object', additionalProperties: true, properties: {} },
+          oneOf: [
+            {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                journey: { type: 'string', required: true },
+                screen: { type: 'string', required: true },
+                state: stringSchema,
+                theme: stringSchema,
+                breakpoint: { type: 'string', required: true },
+                ok: { type: 'boolean', required: true },
+                steps: {
+                  type: 'array',
+                  required: true,
+                  items: { type: 'object', additionalProperties: true, properties: {} },
+                },
+                snapshot: { type: 'object', additionalProperties: true, properties: {} },
+                error: { type: 'string' },
+                diagnostics: { type: 'array', items: { type: 'object', additionalProperties: true, properties: {} } },
+              },
             },
-            snapshot: { type: 'object', additionalProperties: true, properties: {} },
-            error: { type: 'string' },
-            diagnostics: { type: 'array', items: { type: 'object', additionalProperties: true, properties: {} } },
-          },
+            failSchema,
+          ],
         },
-        render: (_args: unknown, value: any) => {
+        render: (_args: unknown, value: JourneyResult | CheckFailure) => {
+          if ('errorCode' in value) return text(formatFailure(value))
           if (value.error !== undefined)
             return text(
               'Journey ' +
@@ -798,16 +929,18 @@ export function apply(ctx: any): void {
               (value.state === undefined ? '' : ' state ' + value.state) +
               ' at ' +
               value.breakpoint +
+              (value.theme === undefined ? '' : ' theme=' + JSON.stringify(value.theme)) +
               ': ' +
               (value.ok ? 'passed' : 'failed'),
             ...value.steps.map(
-              (step: any) =>
+              (step) =>
                 '  ' +
                 String(step.index + 1) +
                 '. ' +
                 step.kind +
                 ' ' +
                 step.status +
+                (step.target === undefined ? '' : ' target=' + JSON.stringify(step.target)) +
                 (step.expected === undefined ? '' : ' expected=' + step.expected) +
                 (step.observed === undefined ? '' : ' observed=' + step.observed) +
                 (step.message === undefined ? '' : ' (' + step.message + ')'),
@@ -827,10 +960,13 @@ export function apply(ctx: any): void {
           return text(lines.join('\n'))
         },
       },
-      async execute(args: any, exec: any) {
-        const { project } = await loadForSession(ctx, exec)
-        const result = await runJourney(checkContext(ctx, exec), project, args.journey)
-        return result
+      async execute(args: { journey: string }, exec: ToolExecution) {
+        const { facts, project } = await loadForSession(ctx, exec)
+        try {
+          return await runJourney(checkContext(ctx, exec, facts), project, args.journey)
+        } catch (error) {
+          return checkFailure(error)
+        }
       },
     }),
   )
@@ -841,6 +977,7 @@ export function apply(ctx: any): void {
       description:
         'Measure layout across configured breakpoints and report overflow, peer overlap, clipped text, small tap targets, and off-token warnings.',
       parameters: {
+        theme: { type: 'string', description: 'Declared token palette; omit for the project default.' },
         screen: { type: 'string', required: true, description: 'Screen id to lint.' },
         state: { type: 'string', description: 'Named screen state to apply before measuring.' },
         breakpoint: { type: 'string', description: 'One configured breakpoint; omit to lint every breakpoint.' },
@@ -851,25 +988,32 @@ export function apply(ctx: any): void {
       },
       output: {
         schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            screen: { type: 'string', required: true },
-            state: { type: 'string' },
-            selection: selectionSchema,
-            variant: selectionSchema,
-            media: mediaSchema,
-            breakpoints: { type: 'array', required: true, items: { type: 'string' } },
-            findings: {
-              type: 'array',
-              required: true,
-              items: { type: 'object', additionalProperties: true, properties: {} },
+          oneOf: [
+            {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                screen: { type: 'string', required: true },
+                state: stringSchema,
+                theme: stringSchema,
+                selection: selectionSchema,
+                variant: variantSchema,
+                media: mediaSchema,
+                breakpoints: { type: 'array', required: true, items: { type: 'string' } },
+                findings: {
+                  type: 'array',
+                  required: true,
+                  items: { type: 'object', additionalProperties: true, properties: {} },
+                },
+                errors: { type: 'number', required: true },
+                warnings: { type: 'number', required: true },
+              },
             },
-            errors: { type: 'number', required: true },
-            warnings: { type: 'number', required: true },
-          },
+            failSchema,
+          ],
         },
-        render: (_args: unknown, value: any) => {
+        render: (_args: unknown, value: LintResult | CheckFailure) => {
+          if ('errorCode' in value) return text(formatFailure(value))
           const header =
             'Lint ' +
             selectionLabel(value) +
@@ -886,7 +1030,7 @@ export function apply(ctx: any): void {
               '\n' +
               value.findings
                 .map(
-                  (finding: any) =>
+                  (finding) =>
                     '  ' +
                     finding.rule +
                     ' [' +
@@ -901,9 +1045,13 @@ export function apply(ctx: any): void {
           )
         },
       },
-      async execute(args: any, exec: any) {
-        const { project } = await loadForSession(ctx, exec)
-        return await runLint(checkContext(ctx, exec), project, args.screen, args)
+      async execute(args: CheckArgs, exec: ToolExecution) {
+        const { facts, project } = await loadForSession(ctx, exec)
+        try {
+          return await runLint(checkContext(ctx, exec, facts), project, args.screen, args)
+        } catch (error) {
+          return checkFailure(error)
+        }
       },
     }),
   )
@@ -914,6 +1062,7 @@ export function apply(ctx: any): void {
       description:
         'Capture the rendered canvas as a deterministic PNG under the design cache, optionally highlighting one stable node; use only when visual evidence is needed.',
       parameters: {
+        theme: { type: 'string', description: 'Declared token palette; omit for the project default.' },
         screen: { type: 'string', required: true, description: 'Screen id to capture.' },
         breakpoint: { type: 'string', description: 'Configured breakpoint; defaults to the widest.' },
         state: { type: 'string', description: 'Named screen state to apply before capture.' },
@@ -925,26 +1074,36 @@ export function apply(ctx: any): void {
       },
       output: {
         schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            path: { type: 'string', required: true },
-            screen: { type: 'string', required: true },
-            state: { type: 'string' },
-            breakpoint: { type: 'string', required: true },
-            highlight: { type: 'string' },
-            variant: selectionSchema,
-            selection: selectionSchema,
-            media: mediaSchema,
-            attachment: selectionSchema,
-            imageDelivery: { type: 'string', required: true },
-            imageFallback: { type: 'string' },
-            width: { type: 'number', required: true },
-            height: { type: 'number', required: true },
-            bytes: { type: 'number', required: true },
-          },
+          oneOf: [
+            {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                path: { type: 'string', required: true },
+                screen: { type: 'string', required: true },
+                state: stringSchema,
+                theme: stringSchema,
+                breakpoint: { type: 'string', required: true },
+                highlight: { type: 'string' },
+                variant: variantSchema,
+                selection: selectionSchema,
+                media: mediaSchema,
+                attachment: selectionSchema,
+                imageDelivery: { type: 'string', required: true },
+                imageFallback: { type: 'string' },
+                width: { type: 'number', required: true },
+                height: { type: 'number', required: true },
+                bytes: { type: 'number', required: true },
+              },
+            },
+            failSchema,
+          ],
         },
-        render: (_args: unknown, value: any) => {
+        render: (
+          _args: unknown,
+          value: (ScreenshotResult & Awaited<ReturnType<typeof screenshotAttachment>>) | CheckFailure,
+        ) => {
+          if ('errorCode' in value) return text(formatFailure(value))
           const content: ToolContent[] = text(
             'Wrote ' +
               value.path +
@@ -956,171 +1115,37 @@ export function apply(ctx: any): void {
               String(value.bytes) +
               ' bytes). ' +
               selectionLabel(value) +
-              ' breakpoint=' +
-              JSON.stringify(value.breakpoint) +
               (value.highlight === undefined ? '' : ' highlight=' + JSON.stringify(value.highlight)) +
-              (value.attachment === undefined
+              (value.imageDelivery === 'path-only'
                 ? '\nPath-only fallback: ' +
                   value.imageFallback +
                   ' Open the saved PNG locally, or use read_image on an image-capable route.'
                 : '') +
               formatMedia(value.media),
           )
-          if (value.attachment !== undefined) content.push({ type: 'image', attachment: value.attachment })
+          if (value.imageDelivery === 'inline') content.push({ type: 'image', attachment: value.attachment })
           return content
         },
       },
-      async execute(args: any, exec: any) {
-        const { project } = await loadForSession(ctx, exec)
-        let image: Awaited<ReturnType<typeof screenshotAttachment>> = {
-          imageDelivery: 'path-only',
-          imageFallback: 'Image delivery is unavailable.',
-        }
-        const result = await captureScreenshot(checkContext(ctx, exec), project, args.screen, args, async (png) => {
-          image = await screenshotAttachment(ctx, exec, png)
-        })
-        return { ...result, ...image }
-      },
-    }),
-  )
-
-  ctx.tools.register(
-    tool({
-      name: 'design_handoff',
-      description:
-        'Generate an on-demand, content-addressed implementation package under the ignored design cache for chosen screens, named states, and breakpoints: editable chosen DSX, support inputs, resolved tokens, relevant journeys, semantic boxes, and canvas screenshots.',
-      parameters: {
-        screens: {
-          type: 'array',
-          items: 'string',
-          description: 'Screen ids to include; omit for every valid chosen screen.',
-        },
-        states: {
-          type: 'array',
-          items: 'string',
-          description:
-            'Named state names, plus "$default" for the unnamed state; omit for the unnamed state and every declared state. A state literally named "default" is selected by its own name.',
-        },
-        breakpoints: {
-          type: 'array',
-          items: 'string',
-          description: 'Configured breakpoint names; omit for every configured breakpoint.',
-        },
-      },
-      output: {
-        schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            status: { type: 'string', required: true },
-            message: { type: 'string' },
-            error: { type: 'string' },
-            errorCode: { type: 'string' },
-            package: { type: 'string' },
-            manifest: { type: 'string' },
-            id: { type: 'string' },
-            screens: { type: 'array', items: { type: 'string' } },
-            supportingScreens: { type: 'array', items: { type: 'string' } },
-            states: { type: 'array', items: { type: 'string' } },
-            breakpoints: { type: 'array', items: { type: 'string' } },
-            projections: { type: 'number' },
-            counts: { type: 'object', additionalProperties: true, properties: {} },
-            bytes: { type: 'number' },
-            warnings: { type: 'array', items: { type: 'string' } },
-            reused: { type: 'boolean' },
-          },
-        },
-        render: (_args: unknown, value: any) => {
-          if (value.status !== 'ok') return text('Handoff ' + value.status + ': ' + (value.error ?? 'unknown error'))
-          return text(
-            'Wrote handoff ' +
-              value.package +
-              ' with ' +
-              String(value.projections) +
-              ' projection(s) across ' +
-              value.screens.join(', ') +
-              ' at ' +
-              value.breakpoints.join(', ') +
-              (value.supportingScreens === undefined || value.supportingScreens.length === 0
-                ? ''
-                : ' with supporting source(s) ' + value.supportingScreens.join(', ')) +
-              '. Manifest: ' +
-              value.manifest,
-          )
-        },
-      },
-      async execute(args: any, exec: any) {
+      async execute(args: CheckArgs, exec: ToolExecution) {
         const { facts, project } = await loadForSession(ctx, exec)
-        if (project.diagnostics.some((diagnostic) => diagnostic.code === 'project-missing')) {
-          return {
-            status: 'error',
-            errorCode: 'no-project',
-            error: 'No design project exists at ' + ctx.design.folderForCwd(facts.cwd) + '; call design_init first.',
-          }
-        }
-        let plan
         try {
-          plan = resolveHandoffPlan(project, {
-            ...(args.screens === undefined ? {} : { screens: args.screens as string[] }),
-            ...(args.states === undefined ? {} : { states: args.states as string[] }),
-            ...(args.breakpoints === undefined ? {} : { breakpoints: args.breakpoints as string[] }),
-            kit: kitMetadata,
-          })
-        } catch (error) {
-          if (error instanceof HandoffSelectionError) {
-            return { status: 'error', errorCode: error.code, error: error.message }
+          let image: Awaited<ReturnType<typeof screenshotAttachment>> = {
+            imageDelivery: 'path-only',
+            imageFallback: 'Image delivery is unavailable.',
           }
-          throw error
-        }
-        try {
-          const result = await runHandoff({
-            folder: project.folder,
+          const result = await captureScreenshot(
+            checkContext(ctx, exec, facts),
             project,
-            plan,
-            ctx: checkContext(ctx, exec),
-          })
-          const packagePath = await projectPath(facts.cwd, project.folder, result.path)
-          return {
-            status: 'ok',
-            message:
-              'Wrote handoff package ' +
-              packagePath +
-              ' with ' +
-              String(result.projections) +
-              ' projection(s)' +
-              (result.reused ? ' (verified cache reuse).' : '.'),
-            package: packagePath,
-            manifest: await projectPath(facts.cwd, project.folder, result.manifest),
-            id: result.id,
-            screens: [...result.screens],
-            supportingScreens: [...result.supportingScreens],
-            states: [...new Set(plan.projections.map((projection) => projection.stateName))],
-            breakpoints: [...result.breakpoints],
-            projections: result.projections,
-            counts: result.counts,
-            bytes: result.bytes,
-            warnings: [...result.warnings],
-            reused: result.reused,
-          }
+            args.screen,
+            args,
+            async (png) => {
+              image = await screenshotAttachment(ctx, exec, png)
+            },
+          )
+          return { ...result, ...image }
         } catch (error) {
-          if (error instanceof HandoffError) {
-            return {
-              status: error.code === 'cancelled' ? 'cancelled' : 'error',
-              errorCode: error.code,
-              error: error.message,
-            }
-          }
-          if (error instanceof PackageError) {
-            return { status: 'error', errorCode: error.code, error: error.message }
-          }
-          if (error instanceof DesignBrowserError) {
-            return {
-              status: error.code === 'cancelled' ? 'cancelled' : error.code === 'timeout' ? 'timeout' : 'error',
-              errorCode: error.code,
-              error: 'The design handoff render failed closed.',
-            }
-          }
-          return { status: 'error', errorCode: 'package-failed', error: 'The design handoff failed closed.' }
+          return checkFailure(error)
         }
       },
     }),
@@ -1130,12 +1155,15 @@ export function apply(ctx: any): void {
     tool({
       name: 'design_query',
       description:
-        'Filter the validated design tree by screen, component, exact scalar prop, and id glob using * or ?; no browser and no executable selectors.',
+        'Find node IDs and source locations in the authored tree. Search all chosen screens by default; use design_view for rendered state, theme, breakpoint or geometry.',
       parameters: {
         screen: { type: 'string', description: 'Restrict to one screen id.' },
         component: { type: 'string', description: 'Exact component name, for example Input.' },
         prop: { type: 'string', description: 'Prop name for an exact scalar match.' },
-        value: { description: 'Exact scalar prop value (string, number, or boolean).' },
+        value: {
+          schema: { oneOf: [stringSchema, { type: 'number' }, { type: 'boolean' }] },
+          description: 'Exact scalar value paired with prop.',
+        },
         id: { type: 'string', description: 'Node id glob using only * and ?.' },
         limit: { type: 'number', description: 'Maximum matches (1-200).' },
         variant: {
@@ -1151,67 +1179,71 @@ export function apply(ctx: any): void {
             matches: {
               type: 'array',
               required: true,
-              items: { type: 'object', additionalProperties: true, properties: {} },
+              items: object({
+                screen: stringField,
+                node: stringField,
+                address: stringField,
+                component: stringField,
+                file: stringField,
+                line: numberField,
+                column: numberField,
+              }),
             },
             total: { type: 'number', required: true },
             truncated: { type: 'boolean', required: true },
-            variant: { type: 'object', additionalProperties: true, properties: {} },
+            screen: stringSchema,
+            variant: variantSchema,
           },
         },
         render: (_args: unknown, value: any) =>
           text(
-            value.matches.length === 0
-              ? 'No nodes match the query.'
-              : value.matches
-                  .map(
-                    (match: any) =>
-                      match.screen +
-                      ' ' +
-                      match.node +
-                      ' <' +
-                      match.component +
-                      '> ' +
-                      match.file +
-                      ':' +
-                      String(match.line) +
-                      ':' +
-                      String(match.column),
-                  )
-                  .join('\n') + (value.truncated ? '\n… ' + String(value.total - value.matches.length) + ' more' : ''),
+            (value.screen === undefined ? 'All screens (chosen branches)' : selectionLabel(value)) +
+              '\n' +
+              (value.matches.length === 0
+                ? 'No nodes match the query.'
+                : value.matches
+                    .map(
+                      (match: any) =>
+                        match.screen +
+                        ' ' +
+                        match.node +
+                        ' <' +
+                        match.component +
+                        '> ' +
+                        match.file +
+                        ':' +
+                        String(match.line) +
+                        ':' +
+                        String(match.column),
+                    )
+                    .join('\n') +
+                  (value.truncated ? '\n… ' + String(value.total - value.matches.length) + ' more' : '')),
           ),
       },
-      async execute(args: any, exec: any) {
+      async execute(args: QueryOptions & { variant?: string }, exec: ToolExecution) {
+        if ((args.prop === undefined) !== (args.value === undefined))
+          throw new Error('design_query: "prop" and "value" must be provided together')
+        if (args.value !== undefined && !['string', 'number', 'boolean'].includes(typeof args.value))
+          throw new Error('design_query: value must be a string, number, or boolean')
+        if (args.limit !== undefined && (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 200))
+          throw new Error('design_query: limit must be an integer from 1 to 200')
+        if (args.variant !== undefined && args.screen === undefined)
+          throw new Error('design_query: an explicit variant requires screen')
         const { project } = await loadForSession(ctx, exec)
-        if (args.value !== undefined) {
-          const kind = typeof args.value
-          if (kind !== 'string' && kind !== 'number' && kind !== 'boolean') {
-            throw new Error('design_query: argument "value" must be a string, number, or boolean')
-          }
+        if (args.screen === undefined) {
+          const screens = project.screens.filter(hasCurrentProjection)
+          return queryDesign({ ...project, screens }, args)
         }
-        if (args.prop === undefined && args.value !== undefined) {
-          throw new Error('design_query: argument "value" requires "prop"')
-        }
-        const screenId = args.screen ?? project.entry
-        if (screenId === undefined) return { matches: [], total: 0, truncated: false }
-        let projection
         try {
-          projection = resolveScreenProjection(project, screenId, args.variant)
+          const { screen, variant } = requireCurrentProjection(project, args.screen, args.variant)
+          return {
+            ...queryDesign({ ...project, screens: [screen] }, args),
+            screen: args.screen,
+            ...(variant === undefined ? {} : { variant }),
+          }
         } catch (error) {
           throw new Error('design_query: ' + (error instanceof Error ? error.message : String(error)), { cause: error })
         }
-        const scopedProject: DesignProject = {
-          ...project,
-          screens: project.screens.map((screen) => (screen.id === screenId ? projection.screen : screen)),
-        }
-        const result = queryDesign(scopedProject, {
-          ...(args.screen === undefined ? {} : { screen: screenId }),
-          ...(args.component === undefined ? {} : { component: args.component }),
-          ...(args.prop === undefined ? {} : { prop: args.prop }),
-          ...(args.value === undefined ? {} : { value: args.value }),
-          ...(args.id === undefined ? {} : { id: args.id }),
-          ...(args.limit === undefined ? {} : { limit: args.limit }),
-        })
-        return projection.variant === undefined ? result : { ...result, variant: projection.variant }
       },
     }),
   )
