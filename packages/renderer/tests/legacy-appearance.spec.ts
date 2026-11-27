@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { chromium, type Browser, type Locator, type Page, type Request } from 'playwright-core'
 import { expect, it } from 'vitest'
 import { BrowserSessions } from '../../host/src/browser.ts'
+import { runningDesignBuild } from '../../host/src/build-identity.ts'
 import { buildPayload } from '../../host/src/payload.ts'
 import { ProjectRegistry } from '../../host/src/registry.ts'
 import { createRouteHandler } from '../../host/src/routes.ts'
@@ -212,7 +213,7 @@ it.skipIf(!chromiumPath)('preserves archived base appearance in owner previews a
           [],
         )
         expect(ownerRequests.filter((request) => request.resourceType() === 'stylesheet').map((r) => r.url())).toEqual([
-          origin + '/design/' + session + '/_/assets/app.css',
+          origin + '/design/' + session + '/_/assets/app.css?build=' + encodeURIComponent(runningDesignBuild.id),
         ])
       } finally {
         await page.close()

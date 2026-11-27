@@ -8,26 +8,6 @@ import { resolveVariantDocument } from '../../core/src/variants.ts'
 import { App } from '../src/app.tsx'
 import type { ProjectPayload } from '../src/wire.ts'
 
-class MockEventSource {
-  static instances: MockEventSource[] = []
-  readonly listeners = new Map<string, ((event: unknown) => void)[]>()
-  closed = false
-  constructor(readonly url: string) {
-    MockEventSource.instances.push(this)
-  }
-  addEventListener(type: string, listener: (event: unknown) => void): void {
-    const list = this.listeners.get(type) ?? []
-    list.push(listener)
-    this.listeners.set(type, list)
-  }
-  close(): void {
-    this.closed = true
-  }
-  emit(type: string, data: unknown): void {
-    for (const listener of this.listeners.get(type) ?? []) listener({ data: JSON.stringify(data) })
-  }
-}
-
 interface FakeDraft {
   id: string
   revision: number
@@ -55,7 +35,6 @@ let updateCalls: any[] = []
 let createCalls: any[] = []
 let commentRequests = 0
 const originalFetch = globalThis.fetch
-const originalEventSource = (globalThis as Record<string, unknown>).EventSource
 
 function responseJson(status: number, value: unknown): any {
   return {
@@ -202,8 +181,6 @@ beforeEach(() => {
   commentRequests = 0
   current = payload(1, [screenOf(home(), 'home', namedStates)])
   sessionStorage.clear()
-  MockEventSource.instances = []
-  ;(globalThis as Record<string, unknown>).EventSource = MockEventSource
   delete (globalThis as Record<string, unknown>).__DSX_PROJECT__
   ;(globalThis as Record<string, unknown>).fetch = vi.fn(async (input: unknown, init?: any) => {
     const url = String(input)
@@ -277,8 +254,7 @@ beforeEach(() => {
         })
       }
     }
-    const match = /rev=(\d+)/.exec(url)
-    return responseJson(200, match === null ? current : { ...current, revision: Number(match[1]) })
+    return responseJson(200, url.endsWith('/_/revision') ? { token: String(current.revision) } : current)
   })
   history.replaceState(null, '', '/design/session-test/')
 })
@@ -286,8 +262,6 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   globalThis.fetch = originalFetch
-  if (originalEventSource === undefined) delete (globalThis as Record<string, unknown>).EventSource
-  else (globalThis as Record<string, unknown>).EventSource = originalEventSource
   delete (globalThis as Record<string, unknown>).__DSX_PROJECT__
 })
 
@@ -485,7 +459,6 @@ describe('review layer', () => {
         namedStates,
       ),
     ])
-    MockEventSource.instances[0]!.emit('revision', { rev: 2 })
     expect(await screen.findByText('New first row')).toBeTruthy()
     await waitFor(() => expect(document.querySelectorAll('.dsx-pin')).toHaveLength(1))
     fireEvent.click(screen.getByRole('button', { name: /Pending \(1\)/ }))
@@ -550,11 +523,9 @@ describe('review layer', () => {
     await ready()
     await waitFor(() => expect(document.querySelectorAll('.dsx-pin')).toHaveLength(1))
     current = payload(2, [screenOf(home(), 'home', namedStates)])
-    MockEventSource.instances[0]!.emit('revision', { rev: 2 })
     await waitFor(() => expect(document.querySelectorAll('.dsx-pin')).toHaveLength(1))
     const edited = screenOf(home().replace('Hello preview', 'Hello edited'), 'home', namedStates)
     current = payload(3, [edited])
-    MockEventSource.instances[0]!.emit('revision', { rev: 3 })
     await waitFor(() => expect(document.querySelectorAll('.dsx-pin')).toHaveLength(0))
     fireEvent.click(screen.getByRole('button', { name: /Pending \(1\)/ }))
     expect(await screen.findByText('content changed')).toBeTruthy()
@@ -829,13 +800,11 @@ describe('review layer', () => {
         namedStates,
       ),
     ])
-    MockEventSource.instances[0]!.emit('revision', { rev: 2 })
     expect(await screen.findByText('Hello preview')).toBeTruthy()
     await waitFor(() => expect(composer.getAttribute('data-anchor')).toBe('unavailable'))
     expect(composer.querySelector('.dsx-review-pointer')).toBeNull()
     expect((screen.getByRole('textbox', { name: 'Comment text' }) as HTMLTextAreaElement).value).toBe('Keep this text')
     current = payload(3, [screenOf(home(), 'home', namedStates)])
-    MockEventSource.instances[0]!.emit('revision', { rev: 3 })
     const restored = (await screen.findByRole('button', { name: 'Open' })) as HTMLElement
     mockRect(restored, { left: 100, top: 160, width: 100, height: 40 })
     fireEvent(window, new Event('resize'))

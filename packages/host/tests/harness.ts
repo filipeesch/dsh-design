@@ -27,6 +27,7 @@ export async function createHarness(
     withProject?: boolean
     assetsDir?: string
     folderName?: string
+    debounceMs?: number
     effectiveCwd?: (session: any) => string | undefined
     sessionController?: any
     extraServices?: Record<string, unknown>
@@ -98,7 +99,7 @@ export async function createHarness(
   }
   applyHost(ctx, {
     folderName: options.folderName ?? 'design',
-    debounceMs: 10,
+    debounceMs: options.debounceMs ?? 10,
     idleStopMs: 50,
     ...(options.assetsDir === undefined ? {} : { assetsDir: options.assetsDir }),
     ...(options.chromiumPath === undefined ? {} : { chromiumPath: options.chromiumPath }),

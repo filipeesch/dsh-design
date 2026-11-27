@@ -5,7 +5,7 @@ import type { ProjectPayload, WireScreen } from './wire.ts'
 export type PreviewDestinationLink = (target: PreviewTarget) => string
 
 export function screenLabel(screen: WireScreen): string {
-  const title = (screen.root ?? screen.lastValidRoot)?.props.title
+  const title = screen.title ?? (screen.root ?? screen.lastValidRoot)?.props.title
   return typeof title === 'string' && title.trim() !== '' ? title : screen.id
 }
 

@@ -53,25 +53,34 @@ export function saveState(session: string, state: PreviewState): void {
 
 /** Keep only state whose nodes still exist in the current project. */
 export function filterState(state: PreviewState, project: ProjectPayload): PreviewState {
-  const ids = new Set<string>()
-  const radios = new Set<string>()
-  const disclosures = new Set<string>()
-  const collectDisclosures = (node: DesignChild | DesignScreenNode | undefined, prefix: string): void => {
+  const knownScreens = new Set(project.screens.map((screen) => screen.id))
+  const authoritative = new Map<string, { ids: Set<string>; radios: Set<string>; disclosures: Set<string> }>()
+  const collectDisclosures = (node: DesignChild | DesignScreenNode | undefined, disclosures: Set<string>): void => {
     if (node === undefined || node.kind === 'text') return
-    if (node.type === 'Disclosure' && node.id !== undefined) disclosures.add(prefix + node.id)
-    for (const child of node.children) collectDisclosures(child, prefix)
+    if (node.type === 'Disclosure' && node.id !== undefined) disclosures.add(node.id)
+    for (const child of node.children) collectDisclosures(child, disclosures)
   }
   for (const screen of project.screens) {
-    const root = screen.lastValidRoot ?? screen.root
+    if (project.token !== undefined && screen.id !== project.projectedScreen) continue
+    if (project.variantError !== undefined && screen.root === undefined && screen.lastValidRoot === undefined) continue
+    const root = screen.root ?? screen.lastValidRoot
+    const ids = new Set<string>()
+    const radios = new Set<string>()
+    const disclosures = new Set<string>()
     collectIds(root, ids, radios)
-    collectDisclosures(root, screen.id + '/')
+    collectDisclosures(root, disclosures)
+    authoritative.set(screen.id, { ids, radios, disclosures })
   }
-  const keep = (key: string): boolean => {
+  const keep = (key: string, disclosure = false): boolean => {
     const slash = key.indexOf('/')
     if (slash === -1) return false
-    const nodePart = key.slice(slash + 1)
-    if (nodePart.startsWith('radio:')) return radios.has(nodePart.slice('radio:'.length))
-    return ids.has(nodePart)
+    const screen = key.slice(0, slash)
+    if (!knownScreens.has(screen)) return false
+    const nodes = authoritative.get(screen)
+    if (nodes === undefined) return true
+    const id = key.slice(slash + 1)
+    if (disclosure) return nodes.disclosures.has(id)
+    return id.startsWith('radio:') ? nodes.radios.has(id.slice('radio:'.length)) : nodes.ids.has(id)
   }
   const pick = <T>(record: Record<string, T>): Record<string, T> => {
     const next: Record<string, T> = {}
@@ -82,7 +91,7 @@ export function filterState(state: PreviewState, project: ProjectPayload): Previ
     openOverlays: pick(state.openOverlays),
     tabs: pick(state.tabs),
     values: pick(state.values),
-    disclosures: Object.fromEntries(Object.entries(state.disclosures).filter(([key]) => disclosures.has(key))),
+    disclosures: Object.fromEntries(Object.entries(state.disclosures).filter(([key]) => keep(key, true))),
   }
 }
 /**
