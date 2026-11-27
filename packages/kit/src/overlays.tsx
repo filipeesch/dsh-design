@@ -1,6 +1,7 @@
 /** Overlay components opened by interaction references. */
-import { useEffect, useRef, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useId, useRef, type CSSProperties, type ReactNode } from 'react'
 import type { DesignElement } from '@filipeesch/dsh-design-core'
+import { anchoredSurface, useAnchoredPanel } from './anchored.ts'
 import { useDesign } from './context.tsx'
 import { useAct, useInteraction } from './interactions.ts'
 import {
@@ -16,7 +17,7 @@ import {
   TEXT,
   type DesignComponentProps,
 } from './primitives.tsx'
-import { nodeAttributes, useStringProp } from './styles.ts'
+import { nodeAttributes, useStringProp, useStyleValue } from './styles.ts'
 
 /** Shared shell: backdrop, dialog panel, close control, Escape handled by the renderer. */
 function OverlayShell({
@@ -36,9 +37,13 @@ function OverlayShell({
   const id = node.id ?? node.address.label
   const open = env.isOverlayOpen(id)
   const act = useAct(node, 'onClose')
-  const title = useStringProp(node, 'title') ?? useStringProp(node, 'message') ?? ''
+  const authoredTitle = useStringProp(node, 'title')
+  const title = authoredTitle ?? ''
   const closeRef = useRef<HTMLButtonElement>(null)
   const dialogRef = useRef<HTMLDivElement>(null)
+  const padding = useStyleValue(node, 'padding') ?? PAD_MD
+  const background = useStyleValue(node, 'background')
+  const titleId = 'dsx-dialog-title-' + useId()
   useEffect(() => {
     if (!open) return
     const dialog = dialogRef.current
@@ -114,7 +119,6 @@ function OverlayShell({
     }
   }, [open])
   if (!open) return null
-  const titleId = 'dsx-dialog-title-' + id
   return (
     <>
       <div
@@ -133,14 +137,14 @@ function OverlayShell({
         aria-modal="true"
         aria-labelledby={title === '' ? undefined : titleId}
         aria-label={title === '' ? 'Dialog' : undefined}
-        style={{ ...overlayStyle(side), ...styles }}
+        style={{ ...overlayStyle(side), ...(background === undefined ? {} : { background }), ...styles }}
       >
         <div
           style={{
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
-            padding: PAD_MD,
+            padding,
             borderBottom: '1px solid ' + BORDER,
           }}
         >
@@ -160,7 +164,7 @@ function OverlayShell({
             ×
           </button>
         </div>
-        <div style={{ padding: PAD_MD, fontFamily: FONT, color: TEXT }}>{children}</div>
+        <div style={{ padding, fontFamily: FONT, color: TEXT, minWidth: 0 }}>{children}</div>
       </div>
     </>
   )
@@ -169,8 +173,14 @@ function OverlayShell({
 /** Drawer side sheet. */
 export function Drawer({ node, children }: DesignComponentProps) {
   const side = useStringProp(node, 'side') === 'left' ? 'left' : 'right'
+  const width = useStyleValue(node, 'width')
   return (
-    <OverlayShell node={node} side={side} role="dialog">
+    <OverlayShell
+      node={node}
+      side={side}
+      role="dialog"
+      styles={{ width: width ?? 'min(var(--dsx-size-drawer, 360px), 88vw)', maxWidth: '100%', overflowY: 'auto' }}
+    >
       {children}
     </OverlayShell>
   )
@@ -178,8 +188,15 @@ export function Drawer({ node, children }: DesignComponentProps) {
 
 /** Centered modal. */
 export function Modal({ node, children }: DesignComponentProps) {
+  const size = useStringProp(node, 'size')
+  const width = size === 'sm' ? 'min(360px, 92vw)' : size === 'lg' ? 'min(720px, 92vw)' : undefined
   return (
-    <OverlayShell node={node} side="center" role="dialog">
+    <OverlayShell
+      node={node}
+      side="center"
+      role="dialog"
+      styles={{ ...(width === undefined ? {} : { width }), maxWidth: '100%' }}
+    >
       {children}
     </OverlayShell>
   )
@@ -187,10 +204,79 @@ export function Modal({ node, children }: DesignComponentProps) {
 
 /** Anchored popover. */
 export function Popover({ node, children }: DesignComponentProps) {
+  const anchor = useStringProp(node, 'anchor')
+  if (anchor !== undefined)
+    return (
+      <AnchoredPopover node={node} anchor={anchor}>
+        {children}
+      </AnchoredPopover>
+    )
   return (
     <OverlayShell node={node} side="center" role="dialog">
       {children}
     </OverlayShell>
+  )
+}
+
+function AnchoredPopover({ node, anchor, children }: DesignComponentProps & { anchor: string }) {
+  const env = useDesign()
+  const id = node.id ?? node.address.label
+  const open = env.isOverlayOpen(id)
+  const closeAction = useAct(node, 'onClose')
+  const panel = useRef<HTMLDivElement>(null)
+  const closeButton = useRef<HTMLButtonElement>(null)
+  const label = useStringProp(node, 'title')?.trim() || 'Popover'
+  const background = useStyleValue(node, 'background')
+  const padding = useStyleValue(node, 'padding') ?? PAD_MD
+  const close = () => {
+    env.closeOverlay(id)
+    closeAction()
+  }
+  const anchorIn = (canvas: HTMLElement) =>
+    [...canvas.querySelectorAll<HTMLElement>('[data-dsx-id]')].find((element) => element.dataset.dsxId === anchor) ??
+    null
+  useAnchoredPanel(open, panel, anchorIn, close, (element) => closeButton.current ?? element)
+  if (!open) return null
+  return (
+    <div
+      {...nodeAttributes(node)}
+      ref={panel}
+      role="dialog"
+      aria-label={label}
+      tabIndex={-1}
+      style={{
+        ...anchoredSurface,
+        ...(background === undefined ? {} : { background }),
+        width: 'max-content',
+        padding,
+        fontFamily: FONT,
+        overflowWrap: 'anywhere',
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: GAP_SM }}>
+        <strong>{label}</strong>
+        <button
+          ref={closeButton}
+          type="button"
+          aria-label="Close"
+          onClick={close}
+          style={{
+            border: 0,
+            background: 'transparent',
+            color: MUTED,
+            fontSize: 18,
+            cursor: 'pointer',
+            minWidth: 44,
+            minHeight: 44,
+            flexShrink: 0,
+            borderRadius: RADIUS,
+          }}
+        >
+          ×
+        </button>
+      </div>
+      {children}
+    </div>
   )
 }
 
@@ -210,12 +296,11 @@ export function Toast({ node, children }: DesignComponentProps) {
   const open = env.isOverlayOpen(id)
   const act = useAct(node, 'onClose')
   const tone = useStringProp(node, 'tone') ?? 'info'
-  const backgrounds: Record<string, string> = {
-    info: '#0ea5e9',
-    success: '#16a34a',
-    warning: '#d97706',
-    danger: '#dc2626',
-  }
+  const message = useStringProp(node, 'message')
+  const backgrounds = { info: '#0ea5e9', success: '#16a34a', warning: '#d97706', danger: '#dc2626' } as const
+  const status = tone === 'success' || tone === 'warning' || tone === 'danger' ? tone : 'info'
+  const background = 'var(--dsx-color-' + status + 'Bg, ' + backgrounds[status] + ')'
+  const color = 'var(--dsx-color-' + status + 'Text, #ffffff)'
   if (!open) return null
   return (
     <>
@@ -232,15 +317,15 @@ export function Toast({ node, children }: DesignComponentProps) {
         role="status"
         style={{
           ...overlayStyle('bottom'),
-          background: backgrounds[tone] ?? backgrounds.info,
-          color: '#ffffff',
+          background,
+          color,
           padding: PAD_MD,
           display: 'flex',
           gap: GAP_SM,
           alignItems: 'center',
         }}
       >
-        <span style={{ fontFamily: FONT, fontSize: 14 }}>{useStringProp(node, 'message') ?? children}</span>
+        <span style={{ fontFamily: FONT, fontSize: 14 }}>{message ?? children}</span>
         <button
           type="button"
           aria-label="Close"
@@ -248,7 +333,7 @@ export function Toast({ node, children }: DesignComponentProps) {
             env.closeOverlay(id)
             act()
           }}
-          style={{ border: 'none', background: 'transparent', color: '#ffffff', cursor: 'pointer', fontSize: 16 }}
+          style={{ border: 'none', background: 'transparent', color, cursor: 'pointer', fontSize: 16 }}
         >
           ×
         </button>

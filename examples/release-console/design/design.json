@@ -1,0 +1,14 @@
+{
+  "kitVersion": "1.0.0",
+  "entry": "overview",
+  "breakpoints": {
+    "mobile": 390,
+    "desktop": 1280
+  },
+  "themes": {
+    "light": "themes/light.json",
+    "dark": "themes/dark.json"
+  },
+  "defaultTheme": "light",
+  "stylesheets": ["styles/release.css"]
+}

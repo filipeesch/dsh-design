@@ -5,7 +5,7 @@
  * A Variants wrapper groups mutually exclusive Variant branches. Resolution is
  * pure and structural: it replaces every wrapper with the selected branch's
  * ordinary children, so validation, fixtures, rendering, tools, comments, and
- * the handoff all consume one resolved screen tree. Wrappers never reach the
+ * inspection all consume one resolved screen tree. Wrappers never reach the
  * kit renderer.
  */
 import type {

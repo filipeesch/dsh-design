@@ -1,11 +1,11 @@
 import { execFile } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createHarness, callTool, type HostHarness } from './harness.ts'
-import { diffGitRevisions, diffProjections } from '../src/diff.ts'
+import { diffGitRevisions, diffProjections, diffVariantBranches } from '../src/diff.ts'
 import { loadProject, scaffoldProject } from '@filipeesch/dsh-design-core'
 import { kitMetadata } from '@filipeesch/dsh-design-kit/meta'
 
@@ -159,6 +159,60 @@ describe('design_diff tool', () => {
   })
 })
 
+describe('shared branch projections', () => {
+  it('resolves different layouts, class declarations and authored locations in each branch', async () => {
+    const h = await harness()
+    const folder = join(h.root, 'design')
+    await Promise.all(['screens', 'layouts', 'styles'].map((name) => mkdir(join(folder, name), { recursive: true })))
+    await writeFile(
+      join(folder, 'design.json'),
+      JSON.stringify({ kitVersion: '1.0.0', stylesheets: ['styles/shared.css'] }),
+    )
+    await writeFile(join(folder, 'tokens.json'), '{}')
+    await writeFile(
+      join(folder, 'layouts', 'compact.dsx'),
+      '<Layout><Text id="nav" styleClass="compact">Short navigation</Text><ContentSlot /></Layout>',
+    )
+    await writeFile(
+      join(folder, 'layouts', 'wide.dsx'),
+      '<Layout><Text id="nav" styleClass="wide">Wide navigation</Text><ContentSlot /></Layout>',
+    )
+    await writeFile(join(folder, 'styles', 'shared.css'), '.compact { padding: 1px; } .wide { padding: 8px; }')
+    await writeFile(
+      join(folder, 'screens', 'home.dsx'),
+      '<Variants id="shell" chosen="short"><Variant branch="short"><Screen id="home" layout="compact"><Text>Short content</Text></Screen></Variant><Variant branch="long"><Screen id="home" layout="wide"><Text>Wide content</Text></Screen></Variant></Variants>',
+    )
+    const load = (previous?: Awaited<ReturnType<typeof loadProject>>) =>
+      loadProject({ folder, kit: kitMetadata, installedKitVersion: '1.0.0', previous })
+    const project = await load()
+    const screen = project.screens[0]!
+    expect(screen.root?.children[0]).toMatchObject({ source: { file: 'layouts/compact.dsx' } })
+    expect(screen.variantSnapshots?.['shell|long']?.root.children[0]).toMatchObject({
+      source: { file: 'layouts/wide.dsx' },
+    })
+    const diff = diffVariantBranches(project, 'home', 'shell', 'short', 'long')
+    expect(diff.ok).toBe(true)
+    expect(diff.changes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ node: 'nav', kind: 'text', before: 'Short navigation', after: 'Wide navigation' }),
+        expect.objectContaining({
+          node: 'nav',
+          kind: 'prop',
+          prop: 'classCss',
+          after: [{ property: 'padding', value: '8px' }],
+        }),
+      ]),
+    )
+    await unlink(join(folder, 'layouts', 'wide.dsx'))
+    const invalid = await load(project)
+    expect(invalid.screens[0]?.blockingErrors).toBe(0)
+    expect(diffVariantBranches(invalid, 'home', 'shell', 'short', 'long')).toMatchObject({
+      ok: false,
+      diagnostics: [expect.objectContaining({ message: expect.stringContaining('layouts/wide.dsx') })],
+    })
+  })
+})
+
 describe('git revision diff', () => {
   it('compares committed revisions without touching the worktree, index, or branch', async () => {
     const { root, folder } = await gitProject()
@@ -240,6 +294,75 @@ describe('git revision diff', () => {
     const archivedDiff = await diffGitRevisions(project, 'home', first, archived)
     expect(archivedDiff.ok).toBe(true)
   })
+
+  it('projects each committed layout, stylesheet and default palette without borrowing worktree files', async () => {
+    const { root, folder } = await gitProject()
+    await Promise.all(['layouts', 'styles', 'themes'].map((name) => mkdir(join(folder, name))))
+    const layout = join(folder, 'layouts', 'workspace.dsx')
+    const stylesheet = join(folder, 'styles', 'shared.css')
+    const palette = join(folder, 'themes', 'dark.json')
+    const originalPalette = '{"colorScheme":"dark","tokens":{"color":{"action":{"$type":"color","$value":"#123456"}}}}'
+    await writeFile(
+      join(folder, 'design.json'),
+      JSON.stringify({
+        kitVersion: '1.0.0',
+        stylesheets: ['styles/shared.css'],
+        themes: { dark: 'themes/dark.json' },
+        defaultTheme: 'dark',
+      }),
+    )
+    await writeFile(
+      join(folder, 'screens', 'home.dsx'),
+      '<Screen id="home" layout="workspace"><Text>Body</Text></Screen>',
+    )
+    await writeFile(layout, '<Layout><Text id="nav" styleClass="header">Before</Text><ContentSlot /></Layout>')
+    await writeFile(stylesheet, '.header { padding: 1px; }')
+    await writeFile(palette, originalPalette)
+    const before = await commit(root, 'initial sources')
+    await writeFile(layout, '<Layout><Text id="nav" styleClass="header">After</Text><ContentSlot /></Layout>')
+    await writeFile(stylesheet, '.header { padding: 2px; }')
+    const after = await commit(root, 'change shared sources')
+    await unlink(palette)
+    const noPalette = await commit(root, 'remove the declared palette')
+    await writeFile(palette, originalPalette)
+    await unlink(stylesheet)
+    const noStyle = await commit(root, 'remove stylesheet instead')
+    await writeFile(stylesheet, '.header { padding: 77px; }')
+    await unlink(layout)
+    const noLayout = await commit(root, 'remove layout instead')
+    await writeFile(layout, '<Layout><Text id="nav" styleClass="header">Current only</Text><ContentSlot /></Layout>')
+    const status = await git(root, ['status', '--porcelain'])
+    const index = await git(root, ['write-tree'])
+    const head = await git(root, ['rev-parse', 'HEAD'])
+    const branch = await git(root, ['symbolic-ref', 'HEAD'])
+    const project = await loadProject({ folder, kit: kitMetadata, installedKitVersion: '1.0.0' })
+    const diff = await diffGitRevisions(project, 'home', before, after)
+    expect(diff.ok).toBe(true)
+    expect(diff.changes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ node: 'nav', kind: 'text', before: 'Before', after: 'After' }),
+        expect.objectContaining({
+          node: 'nav',
+          kind: 'prop',
+          prop: 'classCss',
+          after: [{ property: 'padding', value: '2px' }],
+        }),
+      ]),
+    )
+    for (const [revision, file] of [
+      [noPalette, 'themes/dark.json'],
+      [noStyle, 'styles/shared.css'],
+      [noLayout, 'layouts/workspace.dsx'],
+    ]) {
+      const result = await diffGitRevisions(project, 'home', before, revision!)
+      expect(result.ok).toBe(false)
+      expect(result.diagnostics[0]?.message).toContain(file)
+    }
+    expect(await git(root, ['status', '--porcelain'])).toBe(status)
+    expect(await git(root, ['write-tree'])).toBe(index)
+    expect(await git(root, ['rev-parse', 'HEAD'])).toBe(head)
+    expect(await git(root, ['symbolic-ref', 'HEAD'])).toBe(branch)
+  }, 15000)
 
   it('reports an absent screen at one revision', async () => {
     const { root, folder } = await gitProject()

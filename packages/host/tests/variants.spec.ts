@@ -391,7 +391,7 @@ describe('variant-aware design tools', () => {
 
     const view = await callTool(h, 'design_view', { variant: 'layout:spacious' }, h.root)
     expect(view.error).toContain('retained variant data')
-    const query = callTool(h, 'design_query', { id: 'action', variant: 'layout:spacious' }, h.root)
+    const query = callTool(h, 'design_query', { screen: 'home', id: 'action', variant: 'layout:spacious' }, h.root)
     await expect(query).rejects.toThrow(/retained variant data/)
     const diff = await callTool(
       h,
@@ -403,7 +403,10 @@ describe('variant-aware design tools', () => {
     expect(JSON.stringify(diff.diagnostics)).toContain('retained variant data')
     await expect(
       callTool(h, 'design_screenshot', { screen: 'home', variant: 'layout:spacious' }, h.root),
-    ).rejects.toThrow(/retained variant data/)
+    ).resolves.toMatchObject({
+      errorCode: 'invalid-selection',
+      error: expect.stringContaining('retained variant data'),
+    })
 
     await writeFile(
       join(h.root, 'design', 'screens', 'home.dsx'),
@@ -520,9 +523,43 @@ describe('variant-aware design tools', () => {
     expect(chosenOnly.total).toBe(1)
     const missing = await callTool(h, 'design_query', { id: 'spacious-only' }, h.root)
     expect(missing.total).toBe(0)
-    const alternateOnly = await callTool(h, 'design_query', { id: 'spacious-only', variant: 'layout:spacious' }, h.root)
+    const alternateOnly = await callTool(
+      h,
+      'design_query',
+      { screen: 'home', id: 'spacious-only', variant: 'layout:spacious' },
+      h.root,
+    )
     expect(alternateOnly.total).toBe(1)
     expect(alternateOnly.variant.branch).toBe('spacious')
+  })
+
+  it('queries only current chosen trees without letting a stale alternative hide a valid screen', async () => {
+    const h = await harness()
+    await setup(h)
+    const runtime = h.registry.forFolder(join(h.root, 'design'))
+    await runtime.get()
+    await setup(h, variantScreen.replace('id="spacious-only"', 'id="spacious-only" onPress={open("missing-alt")}'))
+    const edited = await runtime.reload()
+    expect(edited.screens.find(({ id }) => id === 'home')).toMatchObject({ variantStale: true, blockingErrors: 0 })
+    const match = { total: 1, matches: [expect.objectContaining({ screen: 'home', node: 'compact-only' })] }
+    await expect(callTool(h, 'design_query', { id: 'compact-only' }, h.root)).resolves.toMatchObject(match)
+    await expect(callTool(h, 'design_query', { screen: 'home', id: 'compact-only' }, h.root)).resolves.toMatchObject(
+      match,
+    )
+    await expect(callTool(h, 'design_query', { screen: 'home', variant: 'layout:spacious' }, h.root)).rejects.toThrow(
+      'missing-alt',
+    )
+    await expect(callTool(h, 'design_query', { screen: 'home', variant: '' }, h.root)).rejects.toThrow('group:branch')
+
+    await setup(h, variantScreen.replace('id="compact-only"', 'id="compact-only" onPress={open("missing-chosen")}'))
+    await runtime.reload()
+    await expect(callTool(h, 'design_query', { screen: 'home', id: 'compact-only' }, h.root)).rejects.toThrow(
+      /screens\/home\.dsx:\d+:\d+.*missing-chosen/,
+    )
+    await expect(callTool(h, 'design_query', { id: 'compact-only' }, h.root)).resolves.toMatchObject({ total: 0 })
+    await expect(
+      callTool(h, 'design_query', { screen: 'home', variant: 'layout:spacious', id: 'spacious-only' }, h.root),
+    ).resolves.toMatchObject({ total: 1 })
   })
 
   it('rejects unknown selections and incompatible states with actionable diagnostics', async () => {
@@ -532,7 +569,7 @@ describe('variant-aware design tools', () => {
     expect(unknown.error).toContain('does not declare branch')
     await expect(
       callTool(h, 'design_screenshot', { screen: 'home', variant: 'layout:spacious', state: 'drawer-open' }, h.root),
-    ).rejects.toThrow(/incompatible/i)
+    ).resolves.toMatchObject({ errorCode: 'invalid-selection', error: expect.stringMatching(/incompatible/i) })
   })
 
   it('captures distinct deterministic screenshots for chosen and alternate branches', async () => {
@@ -548,7 +585,7 @@ describe('variant-aware design tools', () => {
     )
     expect(chosen.path).not.toBe(alternate.path)
     expect(alternate.variant.branch).toBe('spacious')
-    expect(alternate.path).toContain('layout-spacious')
+    expect(alternate.path).toMatch(/home-mobile-base-[0-9a-f]+\.png$/)
     expect(alternate.width).toBe(390)
     expect(chosen.bytes).not.toBe(alternate.bytes)
   })

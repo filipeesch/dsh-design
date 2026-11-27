@@ -290,36 +290,30 @@ describe('project payload safety', () => {
 })
 
 describe('agent tools', () => {
-  it('registers Design and handoff guidance in the design session scope', async () => {
+  it('registers path-only delivery guidance in the Design session', async () => {
     const h = await harness()
-    const names = h.promptSections.map((section) => section.name)
-    expect(names).toContain('design:guidance')
-    expect(names).toContain('design:handoff')
     const guidance = h.promptSections.find((section) => section.name === 'design:guidance')?.text ?? ''
-    const handoff = h.promptSections.find((section) => section.name === 'design:handoff')?.text ?? ''
     expect(guidance).toContain('design_status')
     expect(guidance).toContain('Variants')
-    expect(handoff).toContain('design_handoff')
-    expect(handoff).toContain('manifest')
+    expect(guidance).toContain('share accessible project-relative source and evidence paths')
+    expect(guidance).not.toContain('design_handoff')
   })
 
   it('registers static Design prompts as literal text without breaking DSX examples', async () => {
     const h = await harness()
     expect(h.promptSections).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ name: 'design:guidance', interpolate: false }),
-        expect.objectContaining({ name: 'design:handoff', interpolate: false }),
-      ]),
+      expect.arrayContaining([expect.objectContaining({ name: 'design:guidance', interpolate: false })]),
     )
     const guidance = h.promptSections.find((section) => section.name === 'design:guidance')?.text
     expect(guidance).toContain('direction={{ mobile: "column", desktop: "row" }}')
     expect(guidance).toContain('states={{ "filter-open":')
   })
 
-  it('offers local preview and handoff without live app capture', async () => {
+  it('offers ten local design tools without export or live app capture', async () => {
     const h = await harness()
     expect(h.tools.has('design_view')).toBe(true)
-    expect(h.tools.has('design_handoff')).toBe(true)
+    expect(h.tools.size).toBe(10)
+    expect(h.tools.has('design_handoff')).toBe(false)
     expect(h.tools.has('design_capture')).toBe(false)
     expect(h.promptSections.map((section) => section.name)).not.toContain('design:capture')
     for (const section of h.promptSections) expect(section.text).not.toContain('design_capture')
@@ -351,6 +345,33 @@ describe('agent tools', () => {
     expect(file.diagnostics.some((diagnostic: any) => diagnostic.file === 'tokens.json')).toBe(false)
     const screen = await callTool(h, 'design_validate', { scope: 'screen', screen: 'home' }, h.root)
     expect(screen.diagnostics.length).toBe(first.diagnostics.length)
+    expect(await callTool(h, 'design_validate', { screen: 'home' }, h.root)).toEqual(screen)
+    expect(await callTool(h, 'design_validate', { file: 'screens/home.dsx' }, h.root)).toEqual(file)
+    for (const args of [
+      { screen: 'missing' },
+      { scope: 'screen' },
+      { file: '../screens/home.dsx' },
+      { scope: 'project', file: 'screens/home.dsx' },
+    ]) {
+      const result = await callTool(h, 'design_validate', args, h.root)
+      expect(result).toMatchObject({ errorCode: 'invalid-selection', error: expect.any(String) })
+    }
+  })
+
+  it('searches authored nodes without broadening an invalid branch selection', async () => {
+    const h = await harness()
+    await writeScreen(h.root, 'other.dsx', '<Screen id="other"><Text id="title">Other</Text></Screen>')
+    const result = await callTool(h, 'design_query', { id: 'title' }, h.root)
+    expect(result.matches).toEqual([expect.objectContaining({ screen: 'other' })])
+    await expect(callTool(h, 'design_query', { variant: 'layout:wide' }, h.root)).rejects.toThrow('requires screen')
+    await expect(callTool(h, 'design_query', { prop: 'label' }, h.root)).rejects.toThrow('provided together')
+  })
+
+  it('emits standard JSON Schema for required geometry case fields', async () => {
+    const h = await harness()
+    const items = h.tools.get('design_view').parameters.properties.cases.items
+    expect(items.required).toEqual(['breakpoint'])
+    expect(items.properties.breakpoint).toEqual({ type: 'string' })
   })
 
   it('projects a screen and a subtree', async () => {
@@ -361,6 +382,7 @@ describe('agent tools', () => {
       '<Screen id="home"><Stack gap="spacing.md"><Text>Hi</Text><Button id="open" onPress={open("filters")}>Open</Button></Stack><Drawer id="filters" title="Filters"><Text>Inside</Text></Drawer></Screen>',
     )
     const full = await callTool(h, 'design_view', {}, h.root)
+    expect(full.error).toBeUndefined()
     expect(full.text).toContain('(closed)')
     expect(full.text).not.toContain('Inside')
     const subtree = await callTool(h, 'design_view', { node: 'filters', open: true }, h.root)

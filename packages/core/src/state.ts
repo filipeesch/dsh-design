@@ -7,6 +7,7 @@
  */
 import type { KitMetadata } from './metadata.ts'
 import { isReference } from './refs.ts'
+import { declaredOption } from './kit-controls.ts'
 import type {
   Breakpoint,
   DesignChild,
@@ -36,7 +37,7 @@ export interface StateExtraction {
 /** Element types whose value state accepts a plain string. */
 const STRING_VALUE_TYPES = new Set(['Input', 'TextArea', 'Select', 'Combobox'])
 /** Element types whose value state accepts a boolean. */
-const BOOLEAN_VALUE_TYPES = new Set(['Checkbox', 'Switch'])
+const BOOLEAN_VALUE_TYPES = new Set(['Checkbox', 'Switch', 'ToggleButton'])
 /** Element types whose value state accepts a string array. */
 const STRING_ARRAY_VALUE_TYPES = new Set(['MultiSelect'])
 
@@ -327,6 +328,21 @@ function readState(
           values[id] = value
           continue
         }
+        if (type === 'SelectButton') {
+          if (typeof value !== 'string' || declaredOption(target.props.options, value) === undefined) {
+            pushState(
+              diagnostics,
+              root,
+              source,
+              'state-value-option',
+              `State "${name}" assigns an undeclared option value to <SelectButton> "${id}".`,
+            )
+            valid = false
+            continue
+          }
+          values[id] = value
+          continue
+        }
         if (BOOLEAN_VALUE_TYPES.has(type)) {
           if (typeof value !== 'boolean') {
             pushState(
@@ -378,7 +394,7 @@ function readState(
           source,
           'state-value-target',
           `State "${name}" assigns a value to <${type}> "${id}", which does not accept a seeded value.`,
-          'Seed Input, TextArea, Select, Combobox, MultiSelect, Checkbox, Switch, or Pagination values.',
+          'Seed Input, TextArea, Select, SelectButton, Combobox, MultiSelect, Checkbox, Switch, ToggleButton, or Pagination values.',
         )
         valid = false
       }
@@ -552,6 +568,11 @@ export function stateCompatibility(root: DesignScreenNode, named: NamedState, ki
     const type = target.type
     if (STRING_VALUE_TYPES.has(type)) {
       if (typeof value !== 'string') issues.push('assigns a non-string value to <' + type + '> "' + id + '"')
+      continue
+    }
+    if (type === 'SelectButton') {
+      if (typeof value !== 'string' || declaredOption(target.props.options, value) === undefined)
+        issues.push('assigns an undeclared option value to <SelectButton> "' + id + '"')
       continue
     }
     if (BOOLEAN_VALUE_TYPES.has(type)) {

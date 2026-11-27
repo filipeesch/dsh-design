@@ -7,7 +7,8 @@ the browser, and iterate with feedback when edits introduce or resolve diagnosti
 This repository implements the `add-design-foundation`,
 `add-design-journeys-and-checks`, `add-design-panel-and-comments`,
 `add-design-variants`, `anchor-design-comment-composer`,
-`add-design-handoff`, and `improve-design-authoring-and-preview` OpenSpec changes.
+`add-design-handoff`, `improve-design-authoring-and-preview`, and
+`improve-design-agent-experience` OpenSpec changes.
 The plugin is developed here, outside the DSH source tree, and installed into a
 DSH profile with `dsh plugin`.
 
@@ -90,13 +91,13 @@ under `/design/<session-id>/` on the DSH web server. Opening a design session
 gives the agent `design_init`, `design_status`, `design_validate`,
 `design_view` (including measured layout), `design_catalog`,
 `design_run_journey`, `design_lint`, `design_screenshot`, `design_query`,
-`design_diff`, and `design_handoff`.
+and `design_diff`. Standard sessions do not receive those tools.
 
 Maintainer release steps and the asset contract are in
 [`docs/releasing.md`](docs/releasing.md).
 
 Live capture of external development applications is deferred and is not
-included in this bundle. Preview and handoff operate on local design sources.
+included in this bundle. Preview and visual checks operate on local design sources.
 
 A session whose working directory contains `design/design.json` gets a live
 preview. The agent shares the URL from `design_status`; open it in a normal
@@ -163,32 +164,39 @@ that name. Neither command deletes the checkout or design folders.
 | `bundle`   | Installable DSH bundle composing the above                                            |
 
 Design files in a target repository are versioned sources: `design/design.json`,
-`design/tokens.json`, `design/screens/*.dsx`, optional `design/preview.json`,
-optional `design/fixtures/*.json`, and optional `design/journeys/*.dsx`. Derived files
-(including screenshots) belong only in `design/.cache/`, which the scaffolded
-`.gitignore` excludes.
+`design/tokens.json`, and `design/screens/*.dsx`, with optional
+`design/layouts/*.dsx`, `design/themes/*.json`, declared local `design/styles/*.css`,
+`design/preview.json`, `design/fixtures/*.json`, `design/journeys/*.dsx`, and local
+assets. Derived files (including screenshots) belong only in `design/.cache/`,
+which the scaffolded `.gitignore` excludes.
 
 ## Author and review a design
 
 Start with the **Design** preset in the target workspace. Call `design_status`
-for the project, preview link, and copyable screen, state, variant, and
-breakpoint selectors; use `design_init` if the project is missing. Use
+for the running plugin build, project, preview link, and copyable screen,
+state, variant, breakpoint, theme, and journey selections. Use `design_init`
+if the project is missing. Use
 `design_catalog({ names: ["Tabs", "ItemTemplate", "named-disclosure"] })` to
-look up components, DSX constructs, and recipes together. Author the primary
-path with semantic kit controls, validate it, and inspect a representative
-canvas early before reusing the layout.
+look up components, DSX constructs, and recipes together. When you do not know
+a name, search English or Portuguese intent with `{ query: "shared sidebar" }`.
+Author the primary path with semantic kit controls, validate it, and inspect a
+representative canvas early before reusing the layout.
 
 In the preview, the screen navigator shows titles and authored situations;
-variants stay in a separate selector. Open the map to see connections around
-the current screen or switch to the full project. Simulated outcomes are
+variants stay in a separate selector. Projects with multiple palettes also have
+a **Theme** selector. Open the map to see connections around the current screen
+or switch to the full project. Simulated outcomes are
 explicit choices outside the canvas and do not run automatically. See the
 [authoring and preview guide](docs/authoring.md) for syntax, examples, and
-browser setup.
+browser setup. The [release console](examples/release-console) demonstrates a
+shared layout, light and dark palettes, class styling, and new controls. A
+preview link with `theme=dark` restores the selected palette, not the viewer's
+transient interactions.
 
 ## Variants
 
 A screen can hold mutually exclusive alternatives. By default, the preview,
-journeys, checks, and handoff use the chosen branch; exploring an alternative never
+journeys and checks use the chosen branch; exploring an alternative never
 changes the source.
 
 ```jsx
@@ -277,11 +285,12 @@ In the interactive preview, **Comment** turns component selection on. A click or
 the keyboard picker (arrow keys move, Enter selects, Escape exits) targets a
 rendered component without activating it. A draft captures the screen,
 breakpoint, component type, stable design id or a visibly unstable structural
-address, the named state, open overlays, tab selections, and the design
-revision. Structural anchors also carry a content fingerprint of the rendered
-screen, so an unchanged preview after an idle runtime reset keeps its pin while
-a same-address edit does not; the numeric revision is diagnostic only. Free-form
-field values, secrets, and arbitrary DOM content are not captured. Drafts live in DSH host memory keyed by session, not in the design
+address, the named state, the effective theme, open overlays, tab selections,
+Disclosure expansion, and the design revision. Structural anchors also carry
+a content fingerprint of the rendered screen, so an unchanged preview after an
+idle runtime reset keeps its pin while a same-address edit does not; the numeric
+revision is diagnostic only. Free-form field values, secrets, and arbitrary DOM
+content are not captured. Drafts live in DSH host memory keyed by session, not in the design
 repository: they survive a browser reload and separate tabs of the same session,
 but not a DSH process restart. Removing the DSH session (or disposing the
 plugin) clears its drafts; a browser reload does not. Two sessions over one project have separate
@@ -306,7 +315,9 @@ message. Rejected delivery keeps the drafts and its retry; a replay of an alread
 accepted batch returns its acknowledgement without enqueuing another message.
 Drafts added or edited while a batch is in flight stay pending. The success
 message counts the versions the session accepted, separately from the drafts
-it cleared and any that remain.
+it cleared and any that remain. Safe coordinates in the submitted message can
+seed a temporary [geometry case](docs/authoring.md#reproduce-a-submitted-review-comment)
+against current source; they never replay an old revision or save a named state.
 
 See [`docs/review/panel-review.md`](docs/review/panel-review.md) for the
 disposable desktop and 390 CSS pixel review and
@@ -323,7 +334,9 @@ media failures are reported separately. `design_screenshot` is opt-in and
 writes a deterministic, canvas-only PNG under `design/.cache/screenshots/`.
 The PNG is also returned inline when supported; otherwise inspect the reported
 path. `design_view` with an explicit `breakpoint` returns computed boxes;
-without it, it stays browser-free.
+without it, it stays browser-free. Use `mode: "geometry"` to measure a short
+list of stable IDs across explicit breakpoint, state, and theme cases without
+returning a tree or writing PNGs.
 
 Browser work is lazy: one Chromium per active DSH session, serialized per
 session, fresh isolated context per check at the project breakpoint width and a
@@ -334,41 +347,15 @@ explicitly. Use the host/profile setup command reported by `design_status`
 for an installed plugin, or `pnpm exec playwright install chromium` from this
 plugin's source checkout. See [Chromium setup](docs/authoring.md#set-up-chromium-for-measured-checks).
 
-## Implementation handoff
+## Deliver an accepted design
 
-`design_handoff` generates a reproducible implementation package on demand under
-`design/.cache/handoff/<content-id>/`. It resolves the requested screen, named
-state, and breakpoint matrix before opening a browser, then writes:
+Share the existing project-relative source paths and the accepted screen, state,
+breakpoint, theme, and variant as applicable. Include the Git revision when it
+matters, plus the relevant validation, journeys, or screenshot paths. A session
+preview link or an ignored screenshot path does not grant another workspace access.
 
-- chosen-only, editable `screens/*.dsx` with stable ids, interactions, and named
-  states, and no variant wrappers or discarded branches;
-- the necessary `tokens.json`, `tokens.resolved.json`, `design.json`, local
-  raster assets, and relevant `journeys/*.dsx` acceptance flows;
-- a bounded chosen-source closure for selected `navigate()` targets and journeys:
-  supporting screens are marked and get DSX only, never extra projections;
-- matching semantic layout JSON and canvas PNGs from the same committed canvas;
-- a sorted `manifest.json` separating the requested `selection` from the
-  `support` closure, with explicit dimensions, choices, browser/kit identity,
-  artifact sizes, and SHA-256 digests. `design.json` keeps every configured
-  breakpoint so responsive maps remain valid, even for a narrower evidence set;
-- durable descriptions and labeled relationships relevant to the requested
-  selections. Illustrative and simulated links are informational: they do not
-  add source or render dependencies, and no simulation controls are exported.
-
-Omitted selectors default to every valid chosen screen, the unnamed state plus
-every named state, and every configured breakpoint, bounded to 24 projections and
-32 screens. Use `states: ["$default"]` for the unnamed state; a named state is
-selected by its literal name, including `"default"`. Projection ids are
-collision-free length-prefixed tuples. The package is content-addressed and
-verified before reuse; invalid, stale, interrupted, or partially published output
-fails explicitly. It is derived cache, never committed. A coding agent in any
-preset can read the manifest and package with ordinary file tools; handoff stays
-in the Design preset.
-
-The import workflow is out of scope for this repository change: no import
-tooling, settings, or artifacts are shipped.
-
-See [`docs/handoff.md`](docs/handoff.md).
+The dedicated implementation exporter was removed. Existing exports remain ordinary
+files on disk; the plugin does not migrate or delete them.
 
 ## Development notes
 

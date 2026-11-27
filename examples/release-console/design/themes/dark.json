@@ -1,0 +1,39 @@
+{
+  "colorScheme": "dark",
+  "tokens": {
+    "color": {
+      "canvas": {
+        "$value": "#101827",
+        "$type": "color"
+      },
+      "surface": {
+        "$value": "#202d43",
+        "$type": "color"
+      },
+      "text": {
+        "$value": "#f4f7ff",
+        "$type": "color"
+      },
+      "muted": {
+        "$value": "#b5c4dc",
+        "$type": "color"
+      },
+      "action": {
+        "$value": "#2860bf",
+        "$type": "color"
+      },
+      "border": {
+        "$value": "#53627d",
+        "$type": "color"
+      },
+      "controlBorder": {
+        "$value": "#7788a6",
+        "$type": "color"
+      },
+      "controlPlaceholder": {
+        "$value": "#a7b6cf",
+        "$type": "color"
+      }
+    }
+  }
+}

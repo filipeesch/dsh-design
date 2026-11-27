@@ -7,6 +7,7 @@
  */
 import { parse as babelParse } from '@babel/parser'
 import type { JSXAttribute, JSXElement, JSXExpressionContainer, Node, Program } from '@babel/types'
+import { declaredOption } from './kit-controls.ts'
 import { findNode } from './view.ts'
 import type { DesignScreenNode, Diagnostic, JourneyStep, NamedState, ParsedJourney, SourceLocation } from './types.ts'
 
@@ -30,7 +31,7 @@ const STEP_NAMES = new Set([
 
 /** Element types accepted by each step kind. */
 const TYPE_TARGETS = new Set(['Input', 'TextArea', 'Combobox'])
-const CHOOSE_TARGETS = new Set(['Select', 'MultiSelect', 'Combobox', 'Radio'])
+const CHOOSE_TARGETS = new Set(['Select', 'MultiSelect', 'Combobox', 'Radio', 'SelectButton'])
 
 interface ParseContext {
   readonly file: string
@@ -177,13 +178,18 @@ function parseStep(ctx: ParseContext, element: JSXElement): JourneyStep | undefi
   const source = locationOf(element, ctx.file)
   switch (name) {
     case 'Tap': {
-      const values = stepAttributes(ctx, element, ['target'])
+      const values = stepAttributes(ctx, element, ['target', 'part'])
       if (values === undefined) return undefined
       if (typeof values.target !== 'string' || values.target === '') {
         report(ctx, element, 'journey-argument', '<Tap> requires a string target id.')
         return undefined
       }
-      return { kind: 'tap', target: values.target, source }
+      const part = values.part
+      if (part !== undefined && part !== 'primary' && part !== 'menu') {
+        report(ctx, element, 'journey-argument', '<Tap> part must be "primary" or "menu" when present.')
+        return undefined
+      }
+      return { kind: 'tap', target: values.target, ...(part === undefined ? {} : { part }), source }
     }
     case 'Type': {
       const values = stepAttributes(ctx, element, ['target', 'value'])
@@ -199,7 +205,7 @@ function parseStep(ctx: ParseContext, element: JSXElement): JourneyStep | undefi
       return { kind: 'type', target: values.target, value: values.value, source }
     }
     case 'Choose': {
-      const values = stepAttributes(ctx, element, ['target', 'value'])
+      const values = stepAttributes(ctx, element, ['target', 'value', 'part'])
       if (values === undefined) return undefined
       if (typeof values.target !== 'string' || values.target === '') {
         report(ctx, element, 'journey-argument', '<Choose> requires a string target id.')
@@ -209,7 +215,22 @@ function parseStep(ctx: ParseContext, element: JSXElement): JourneyStep | undefi
         report(ctx, element, 'journey-argument', '<Choose> requires a string, number, or boolean value.')
         return undefined
       }
-      return { kind: 'choose', target: values.target, value: String(values.value), source }
+      const part = values.part
+      if (part !== undefined && part !== 'menu') {
+        report(ctx, element, 'journey-argument', '<Choose> part must be "menu" when present.')
+        return undefined
+      }
+      if (part === 'menu' && (typeof values.value !== 'string' || !ID_PATTERN.test(values.value))) {
+        report(ctx, element, 'journey-argument', '<Choose part="menu"> requires a stable option value.')
+        return undefined
+      }
+      return {
+        kind: 'choose',
+        target: values.target,
+        value: String(values.value),
+        ...(part === undefined ? {} : { part }),
+        source,
+      }
     }
     case 'Navigate': {
       const values = stepAttributes(ctx, element, ['screen'])
@@ -275,8 +296,8 @@ function parseStep(ctx: ParseContext, element: JSXElement): JourneyStep | undefi
 function parseRootAttributes(
   ctx: ParseContext,
   element: JSXElement,
-): { id: string; start: string; state?: string; breakpoint?: string } | undefined {
-  const values = stepAttributes(ctx, element, ['id', 'start', 'state', 'breakpoint'])
+): { id: string; start: string; state?: string; breakpoint?: string; theme?: string } | undefined {
+  const values = stepAttributes(ctx, element, ['id', 'start', 'state', 'breakpoint', 'theme'])
   if (values === undefined) return undefined
   if (typeof values.id !== 'string' || !ID_PATTERN.test(values.id)) {
     report(ctx, element, 'journey-id', '<Journey> requires an id matching [a-z][a-z0-9-]*.')
@@ -294,9 +315,14 @@ function parseRootAttributes(
     report(ctx, element, 'journey-breakpoint', '<Journey> breakpoint must be a string when present.')
     return undefined
   }
+  if (values.theme !== undefined && (typeof values.theme !== 'string' || !ID_PATTERN.test(values.theme))) {
+    report(ctx, element, 'journey-theme', '<Journey> theme must be a literal theme name when present.')
+    return undefined
+  }
   return {
     id: values.id,
     start: values.start,
+    ...(values.theme === undefined ? {} : { theme: values.theme }),
     ...(values.state === undefined ? {} : { state: values.state as string }),
     ...(values.breakpoint === undefined ? {} : { breakpoint: values.breakpoint as string }),
   }
@@ -416,6 +442,7 @@ export function parseJourney(source: string, file: string): ParsedJourney {
 export interface JourneyValidationContext {
   readonly projectScreens: readonly string[]
   readonly breakpoints: readonly string[]
+  readonly themes?: readonly string[]
   readonly rootOf: (screen: string) => DesignScreenNode | undefined
   readonly statesOf: (screen: string) => readonly NamedState[]
 }
@@ -481,6 +508,18 @@ export function validateJourney(parsed: ParsedJourney, ctx: JourneyValidationCon
     )
   }
 
+  const themes = ctx.themes ?? ['base']
+  if (journey.theme !== undefined && !themes.includes(journey.theme)) {
+    push(
+      diagnostics,
+      parsed.file,
+      journey.source,
+      'journey-theme-missing',
+      `Journey "${journey.id}" uses theme "${journey.theme}", which is not available.`,
+      'Available themes: ' + themes.join(', ') + '.',
+    )
+  }
+
   let current = journey.start
   let root = ctx.rootOf(current)
   const requireTarget = (
@@ -488,7 +527,8 @@ export function validateJourney(parsed: ParsedJourney, ctx: JourneyValidationCon
     source: SourceLocation,
     allow: readonly string[] | undefined,
     purpose: string,
-  ): void => {
+    index: number,
+  ): ReturnType<typeof findNode> => {
     if (root === undefined) return
     const node = findNode(root, target)
     if (node === undefined) {
@@ -497,7 +537,7 @@ export function validateJourney(parsed: ParsedJourney, ctx: JourneyValidationCon
         parsed.file,
         source,
         'journey-target-missing',
-        `Journey "${journey.id}" ${purpose} target "${target}", which does not exist on screen "${current}".`,
+        `Journey "${journey.id}" step ${String(index + 1)} ${purpose} target "${target}", which does not exist on screen "${current}".`,
       )
       return
     }
@@ -507,13 +547,15 @@ export function validateJourney(parsed: ParsedJourney, ctx: JourneyValidationCon
         parsed.file,
         source,
         'journey-target-type',
-        `Journey "${journey.id}" ${purpose} "<${node.type}> ${target}", which is not a compatible control.`,
+        `Journey "${journey.id}" step ${String(index + 1)} ${purpose} "<${node.type}> ${target}", which is not a compatible control.`,
         'Use one of: ' + allow.join(', ') + '.',
       )
+      return undefined
     }
+    return node
   }
 
-  for (const step of journey.steps) {
+  for (const [index, step] of journey.steps.entries()) {
     switch (step.kind) {
       case 'navigate':
       case 'expect-screen': {
@@ -533,23 +575,53 @@ export function validateJourney(parsed: ParsedJourney, ctx: JourneyValidationCon
         root = ctx.rootOf(current)
         break
       }
-      case 'tap':
-        requireTarget(step.target, step.source, undefined, 'taps')
+      case 'tap': {
+        const node = requireTarget(
+          step.target,
+          step.source,
+          step.part === undefined ? undefined : ['SplitButton'],
+          'taps',
+          index,
+        )
+        if (node?.type === 'SplitButton' && step.part === undefined) {
+          push(
+            diagnostics,
+            parsed.file,
+            step.source,
+            'journey-target-part',
+            `Step ${String(index + 1)} taps SplitButton "${step.target}"; specify part="primary" or part="menu".`,
+          )
+        }
         break
+      }
       case 'type':
-        requireTarget(step.target, step.source, [...TYPE_TARGETS], 'types into')
+        requireTarget(step.target, step.source, [...TYPE_TARGETS], 'types into', index)
         break
-      case 'choose':
-        requireTarget(step.target, step.source, [...CHOOSE_TARGETS], 'chooses in')
+      case 'choose': {
+        const allowed = step.part === 'menu' ? ['SplitButton'] : [...CHOOSE_TARGETS]
+        const node = requireTarget(step.target, step.source, allowed, 'chooses in', index)
+        if (node?.type === 'SelectButton' || node?.type === 'SplitButton') {
+          const option = declaredOption(node.props.options, step.value)
+          if (option === undefined) {
+            push(
+              diagnostics,
+              parsed.file,
+              step.source,
+              'journey-option-missing',
+              `Step ${String(index + 1)} chooses option "${step.value}" on "${step.target}", which does not declare it.`,
+            )
+          }
+        }
         break
+      }
       case 'expect-visible':
-        requireTarget(step.target, step.source, undefined, 'looks for')
+        requireTarget(step.target, step.source, undefined, 'looks for', index)
         break
       case 'expect-value':
-        requireTarget(step.target, step.source, undefined, 'checks the value of')
+        requireTarget(step.target, step.source, undefined, 'checks the value of', index)
         break
       case 'expect-count':
-        requireTarget(step.target, step.source, undefined, 'counts')
+        requireTarget(step.target, step.source, undefined, 'counts', index)
         break
     }
   }

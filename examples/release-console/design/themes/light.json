@@ -1,0 +1,19 @@
+{
+  "colorScheme": "light",
+  "tokens": {
+    "color": {
+      "canvas": {
+        "$value": "#eff6ff",
+        "$type": "color"
+      },
+      "surface": {
+        "$value": "#ffffff",
+        "$type": "color"
+      },
+      "action": {
+        "$value": "#174aa8",
+        "$type": "color"
+      }
+    }
+  }
+}

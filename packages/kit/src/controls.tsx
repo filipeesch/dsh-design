@@ -1,5 +1,5 @@
 /** Form controls, buttons, and tabs. */
-import { createContext, useContext, useLayoutEffect, useRef, type CSSProperties } from 'react'
+import { createContext, useContext, useId, useLayoutEffect, useRef, type CSSProperties } from 'react'
 import type { DesignElement, DesignPropValue } from '@filipeesch/dsh-design-core'
 import { useDesign } from './context.tsx'
 import { useAct } from './interactions.ts'
@@ -22,11 +22,15 @@ function buttonColors(variant: string): CSSProperties {
     case 'ghost':
       return { background: 'transparent', color: TEXT, border: '1px solid transparent' }
     case 'danger':
-      return { background: 'var(--dsx-color-danger, #dc2626)', color: '#ffffff', border: '1px solid transparent' }
+      return {
+        background: 'var(--dsx-color-danger, #dc2626)',
+        color: 'var(--dsx-color-dangerActionText, #ffffff)',
+        border: '1px solid transparent',
+      }
     case 'link':
       return { background: 'transparent', color: ACTION, border: '1px solid transparent', textDecoration: 'underline' }
     default:
-      return { background: ACTION, color: '#ffffff', border: '1px solid transparent' }
+      return { background: ACTION, color: 'var(--dsx-color-actionText, #ffffff)', border: '1px solid transparent' }
   }
 }
 
@@ -133,13 +137,13 @@ function FieldLabel({ label }: { label: string | undefined }) {
 }
 
 const FIELD_STYLE: CSSProperties = {
-  border: '1px solid ' + BORDER,
+  border: '1px solid var(--dsx-color-controlBorder, ' + BORDER + ')',
   borderRadius: RADIUS,
   padding: '8px 10px',
   fontFamily: FONT,
   fontSize: 14,
-  color: TEXT,
-  background: SURFACE,
+  color: 'var(--dsx-color-controlText, ' + TEXT + ')',
+  background: 'var(--dsx-color-control, ' + SURFACE + ')',
   boxSizing: 'border-box',
 }
 
@@ -148,13 +152,23 @@ export function Input({ node }: DesignComponentProps) {
   const label = useStringProp(node, 'label')
   const placeholder = useStringProp(node, 'placeholder')
   const type = useStringProp(node, 'type') ?? 'text'
+  const grow = useBooleanProp(node, 'grow') ?? false
   const disabled = useBooleanProp(node, 'disabled') ?? false
   const env = useDesign()
   const act = useAct(node, 'onChange')
   const id = node.id ?? node.address.label
   const value = String(env.getValue(id, useStringProp(node, 'value') ?? '') ?? '')
   return (
-    <label {...nodeAttributes(node)} style={{ display: 'flex', flexDirection: 'column', gap: 4, fontFamily: FONT }}>
+    <label
+      {...nodeAttributes(node)}
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 4,
+        fontFamily: FONT,
+        ...(grow ? { flex: '1 1 0', minWidth: 0 } : {}),
+      }}
+    >
       <FieldLabel label={label} />
       <input
         type={type}
@@ -165,7 +179,7 @@ export function Input({ node }: DesignComponentProps) {
           env.setValue(id, event.target.value)
           act()
         }}
-        style={FIELD_STYLE}
+        style={grow ? { ...FIELD_STYLE, width: '100%', minWidth: 0 } : FIELD_STYLE}
       />
     </label>
   )
@@ -387,6 +401,7 @@ export function Radio({ node }: DesignComponentProps) {
 /** Toggle switch. */
 export function Switch({ node }: DesignComponentProps) {
   const label = useStringProp(node, 'label')
+  const track = useStringProp(node, 'appearance') === 'track'
   const disabled = useBooleanProp(node, 'disabled') ?? false
   const env = useDesign()
   const id = node.id ?? node.address.label
@@ -406,14 +421,42 @@ export function Switch({ node }: DesignComponentProps) {
           env.setValue(id, event.target.checked)
           act()
         }}
-        style={{ width: 34, height: 20 }}
+        style={
+          track
+            ? ({
+                appearance: 'none',
+                display: 'inline-flex',
+                alignItems: 'center',
+                width: 34,
+                minWidth: 34,
+                height: 20,
+                margin: 0,
+                borderRadius: 10,
+                border: FIELD_STYLE.border,
+                cursor: disabled ? 'not-allowed' : 'pointer',
+                opacity: disabled ? 0.6 : 1,
+                backgroundColor: checked
+                  ? 'var(--dsx-color-selected, ' + ACTION + ')'
+                  : 'var(--dsx-color-control, ' + SURFACE + ')',
+                backgroundImage: 'radial-gradient(circle, var(--dsx-switch-thumb) 6px, transparent 7px)',
+                backgroundPosition: checked ? 'right center' : 'left center',
+                backgroundSize: '18px 18px',
+                backgroundRepeat: 'no-repeat',
+                '--dsx-switch-thumb': checked
+                  ? 'var(--dsx-color-selectedText, #fff)'
+                  : 'var(--dsx-color-controlText, ' + TEXT + ')',
+              } as CSSProperties)
+            : { width: 34, height: 20 }
+        }
       />
       {label}
     </label>
   )
 }
 
-const TabPanelContext = createContext<{ node: DesignElement; labelledBy: string } | undefined>(undefined)
+const TabPanelContext = createContext<{ node: DesignElement; labelledBy: string; panelId: string } | undefined>(
+  undefined,
+)
 
 /** Tab list and active panel. */
 export function Tabs({ node }: DesignComponentProps) {
@@ -431,8 +474,9 @@ export function Tabs({ node }: DesignComponentProps) {
     0,
     tabs.findIndex((tab) => (tab.id ?? tab.address.label) === active || tab.props.value === active),
   )
-  const focusId = (key: string) => 'dsx-tab-' + key
-  const panelId = (key: string) => 'dsx-panel-' + key
+  const instance = useId()
+  const focusId = (key: string) => 'dsx-tab-' + instance + '-' + key
+  const panelId = (key: string) => 'dsx-panel-' + instance + '-' + key
   const select = (index: number) => {
     const tab = tabs[index]
     if (tab === undefined || index === activeIndex) return
@@ -457,6 +501,8 @@ export function Tabs({ node }: DesignComponentProps) {
           return (
             <button
               key={key}
+              {...nodeAttributes(tab)}
+              data-dsx-part="trigger"
               type="button"
               role="tab"
               id={focusId(key)}
@@ -480,6 +526,12 @@ export function Tabs({ node }: DesignComponentProps) {
               }}
               style={{
                 ...buttonColors(selected ? 'primary' : 'ghost'),
+                ...(selected
+                  ? {
+                      background: 'var(--dsx-color-selected, ' + ACTION + ')',
+                      color: 'var(--dsx-color-selectedText, var(--dsx-color-actionText, #ffffff))',
+                    }
+                  : {}),
                 padding: compact ? 'var(--dsx-spacing-xs, 4px) var(--dsx-spacing-sm, 8px)' : '8px 12px',
                 border: 'none',
                 borderBottom: selected ? '2px solid ' + ACTION : '2px solid transparent',
@@ -501,7 +553,7 @@ export function Tabs({ node }: DesignComponentProps) {
           if (index !== activeIndex)
             return <div key={key} id={panelId(key)} role="tabpanel" aria-labelledby={focusId(key)} hidden />
           return (
-            <TabPanelContext.Provider key={key} value={{ node: tab, labelledBy: focusId(key) }}>
+            <TabPanelContext.Provider key={key} value={{ node: tab, labelledBy: focusId(key), panelId: panelId(key) }}>
               {env.renderNode(tab)}
             </TabPanelContext.Provider>
           )
@@ -518,9 +570,9 @@ export function Tab({ node, children }: DesignComponentProps) {
   const nested = panel?.node === node
   return (
     <div
-      {...nodeAttributes(node)}
+      {...(nested ? { 'data-dsx-tab-panel': node.id ?? node.address.label } : nodeAttributes(node))}
       role="tabpanel"
-      id={nested ? 'dsx-panel-' + (node.id ?? node.address.label) : undefined}
+      id={nested ? panel.panelId : undefined}
       aria-labelledby={nested ? panel.labelledBy : undefined}
       aria-label={nested ? undefined : label}
     >
@@ -536,7 +588,8 @@ export function Disclosure({ node, children }: DesignComponentProps) {
   const label = useStringProp(node, 'label')?.trim() || 'Details'
   const defaultOpen = useBooleanProp(node, 'defaultOpen') ?? false
   const expanded = env.isDisclosureOpen(id, defaultOpen)
-  const contentId = 'dsx-disclosure-content-' + id
+  const expandedLabel = useStringProp(node, 'expandedLabel')?.trim() || label
+  const contentId = 'dsx-disclosure-content-' + useId()
   const toggle = useRef<HTMLButtonElement>(null)
   const content = useRef<HTMLDivElement>(null)
   const focusWithin = useRef(false)
@@ -575,7 +628,7 @@ export function Disclosure({ node, children }: DesignComponentProps) {
         }}
       >
         <IconSlot node={{ ...node, props: { name: expanded ? 'chevron-down' : 'chevron-right', size: '16px' } }} />
-        {label}
+        {expanded ? expandedLabel : label}
       </button>
       <div
         id={contentId}

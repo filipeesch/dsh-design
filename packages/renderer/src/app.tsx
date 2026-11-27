@@ -1,5 +1,5 @@
 /** Preview application: chrome, frame, live reload, and interaction state. */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties } from 'react'
 import {
   canonicalVariantIdentity,
   collectCssRules,
@@ -27,6 +27,8 @@ import {
   seedState,
   type PreviewState,
 } from './state.ts'
+import { selectPalette, ThemeNotice } from './theme.tsx'
+import { collectReviewState } from './review-state.ts'
 import { ReviewOverlay } from './review.tsx'
 import type { ProjectPayload, WireScreen } from './wire.ts'
 
@@ -45,6 +47,7 @@ function findScreen(project: ProjectPayload | undefined, id: string | undefined)
 /** Root preview application. */
 export function App() {
   const route = useRoute()
+  const canvasId = 'canvas-' + useId().replace(/[^a-z0-9-]/gi, '')
   const session = route.session
   const bootstrap = route.deterministic
     ? (globalThis as { __DSX_PROJECT__?: ProjectPayload }).__DSX_PROJECT__
@@ -65,6 +68,8 @@ export function App() {
     bootstrap === undefined ? undefined : { key: projectionKey, project: bootstrap },
   )
   const project = snapshot?.key === projectionKey ? snapshot.project : undefined
+  const theme = project === undefined ? undefined : selectPalette(project, route)
+  const palette = theme?.palette
   // The chrome unmounts while a new projection loads; keep the request here.
   const outcomeDestination = useRef<string | undefined>(undefined)
   const navigateOutcome = useCallback((href: string) => {
@@ -147,7 +152,7 @@ export function App() {
           ...(variantParam === undefined ? {} : { variant: variantParam }),
         })
           .then((next) => {
-            if (subscribed) updateProject(next)
+            if (subscribed && next.revision > revision.current) updateProject(next)
           })
           .catch(() => undefined)
       }
@@ -191,9 +196,11 @@ export function App() {
       : undefined
   const variantError =
     route.variant === undefined ? malformedVariantError : (malformedVariantError ?? project?.variantError)
+  // The host rejects stale inputs to checks; explicit preview payloads may still
+  // display their retained tree with diagnostics without claiming fresh evidence.
   const currentRoot = !projectFatal && screenErrors === 0 ? activeScreen?.root : undefined
   const retainedRoot =
-    route.variant !== undefined
+    route.deterministic || route.variant !== undefined
       ? undefined
       : activeScreen === undefined
         ? undefined
@@ -232,7 +239,11 @@ export function App() {
     if (appliedSeed.current === key) return
     const first = appliedSeed.current === undefined
     appliedSeed.current = key
-    const named = screenStates.find((candidate) => candidate.name === route.state)
+    const override =
+      first && route.deterministic && bootstrap?.initialState?.screen === screenId
+        ? bootstrap.initialState.seed
+        : undefined
+    const named = override ?? screenStates.find((candidate) => candidate.name === route.state)
     const compatible =
       named === undefined
         ? false
@@ -242,12 +253,12 @@ export function App() {
     setState((current) => {
       // Initial mount keeps compatible persisted interaction when the route
       // carries no named state; later shared-selector changes reset it.
-      if (first && route.state === undefined) return current
+      if (first && route.state === undefined && override === undefined) return current
       const cleared = clearScreenState(current, screenId)
       if (first) return named !== undefined && compatible ? seedState(current, screenId, named) : cleared
       return named === undefined || !compatible ? cleared : seedState(cleared, screenId, named)
     })
-  }, [ready, screenId, route.state, screenStates, route.variant, tree])
+  }, [ready, screenId, route.state, route.deterministic, bootstrap, screenStates, route.variant, tree])
 
   const imageUrl = useCallback(
     (path: string) => {
@@ -270,19 +281,10 @@ export function App() {
     }
     return set
   }, [state.openOverlays, screenId])
-  const overlayList = useMemo(() => [...openOverlays].sort((left, right) => left.localeCompare(right)), [openOverlays])
-  const tabSelections = useMemo(() => {
-    const selections: Record<string, string> = {}
-    if (screenId === undefined) return selections
-    const prefix = screenId + '/'
-    for (const [key, value] of Object.entries(state.tabs)) {
-      if (!key.startsWith(prefix)) continue
-      const node = key.slice(prefix.length)
-      if (node === '' || node.startsWith('radio:')) continue
-      selections[node] = value
-    }
-    return selections
-  }, [state.tabs, screenId])
+  const reviewState = useMemo(
+    () => collectReviewState(tree, state, openOverlays, breakpoints, breakpointName),
+    [tree, state, openOverlays, breakpoints, breakpointName],
+  )
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -303,13 +305,14 @@ export function App() {
   }, [openOverlays, screenId])
 
   const cssText = useMemo(
-    () => (tree === undefined ? '' : collectCssRules(tree, imageUrl).join('\n')),
-    [tree, imageUrl],
+    () =>
+      tree === undefined ? '' : collectCssRules(tree, imageUrl, '[data-dsx-canvas="' + canvasId + '"]').join('\n'),
+    [tree, imageUrl, canvasId],
   )
 
   const environment: DesignEnvironment = useMemo(
     () => ({
-      tokens: project?.tokens ?? {},
+      tokens: palette?.tokens ?? {},
       breakpoints,
       activeBreakpoint: breakpointName,
       deterministic: route.deterministic,
@@ -369,7 +372,7 @@ export function App() {
       imageUrl,
     }),
     [
-      project,
+      palette,
       breakpoints,
       breakpointName,
       route.deterministic,
@@ -385,7 +388,7 @@ export function App() {
   const projectErrors =
     project === undefined ? [] : project.diagnostics.filter((diagnostic) => diagnostic.severity === 'error')
   const activeErrors = activeScreen?.diagnostics.filter((diagnostic) => diagnostic.severity === 'error') ?? []
-  const overlayErrors: Diagnostic[] = [...(projectFatal ? projectErrors : []), ...activeErrors]
+  const overlayErrors: Diagnostic[] = [...new Set([...(projectFatal ? projectErrors : []), ...activeErrors])]
 
   if (loadError !== undefined) {
     return (
@@ -405,7 +408,12 @@ export function App() {
           The comparison query "{route.compareRaw}" is not a group:left:right selection. No branch or screen is
           substituted.
         </p>
-        <a href={buildRouteUrl(project.config.entry ?? route.screen, { breakpoint: route.breakpoint })}>
+        <a
+          href={buildRouteUrl(project.config.entry ?? route.screen, {
+            breakpoint: route.breakpoint,
+            theme: route.theme,
+          })}
+        >
           Open the chosen screen
         </a>
       </div>
@@ -418,6 +426,7 @@ export function App() {
   const variantIdentity = canonicalVariantIdentity(activeScreen?.effectiveSelection ?? {})
   const canvas = (
     <main className="dsx-stage">
+      <ThemeNotice project={project} route={route} />
       {unknownState ? (
         <div className="dsx-notice error" role="alert">
           <strong>Unknown state</strong>
@@ -467,7 +476,7 @@ export function App() {
           <p>{project.projectError}</p>
         </div>
       ) : null}
-      {frame === undefined || tree === undefined ? (
+      {palette === undefined ? null : frame === undefined || tree === undefined ? (
         <div className="dsx-notice error" role="alert">
           <strong>{variantError === undefined ? 'No renderable screen' : 'Variant unavailable'}</strong>
           <p>
@@ -489,17 +498,20 @@ export function App() {
             className="dsx-frame"
             ref={attachFrame}
             data-breakpoint={frame.name}
+            data-theme={theme?.name}
             data-screen={screenId ?? ''}
             style={{ width: frame.width, minHeight: 520 }}
           >
             <style>{cssText}</style>
             <div
               className="dsx-frame-inner"
+              data-dsx-canvas={canvasId}
               style={
                 {
-                  ...(project.cssVariables as React.CSSProperties),
+                  ...palette.cssVariables,
+                  colorScheme: palette.colorScheme,
                   '--dsx-font-family': '"Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif',
-                } as React.CSSProperties
+                } as CSSProperties
               }
             >
               <DesignEnvironmentContext.Provider value={environment}>
@@ -524,7 +536,9 @@ export function App() {
               </li>
             ))}
           </ul>
-          {activeScreen?.lastValidRoot !== undefined ? <p>Showing the last valid render.</p> : null}
+          {currentRoot === undefined || activeScreen?.variantStale === true ? (
+            <p>Showing the last valid render.</p>
+          ) : null}
         </div>
       ) : null}
       {activeScreen !== undefined && activeScreen.errors === 0 && activeScreen.warnings > 0 ? (
@@ -556,6 +570,8 @@ export function App() {
       data-dsx-deterministic={route.deterministic ? '1' : undefined}
       data-dsx-clock={route.deterministic ? String(FIXED_TIME) : undefined}
       data-dsx-state={route.state}
+      data-dsx-theme={theme?.name}
+      data-dsx-theme-error={palette === undefined || palette.stale === true ? '1' : undefined}
       data-dsx-state-error={unknownState || incompatibleState !== undefined ? '1' : undefined}
       data-dsx-variant={variantIdentity}
       data-dsx-variant-chosen={activeScreen?.variant?.chosen === true ? '1' : undefined}
@@ -572,7 +588,12 @@ export function App() {
           breakpoint={breakpointName}
           state={appliedState}
           canSimulate={
-            currentRoot !== undefined && tree !== undefined && !unknownState && incompatibleState === undefined
+            currentRoot !== undefined &&
+            tree !== undefined &&
+            palette !== undefined &&
+            palette.stale !== true &&
+            !unknownState &&
+            incompatibleState === undefined
           }
           attachBar={attachBar}
           onSimulate={navigateOutcome}
@@ -581,7 +602,11 @@ export function App() {
           {canvas}
         </PreviewChrome>
       )}
-      {!route.deterministic && tree !== undefined && frame !== undefined && screenId !== undefined ? (
+      {!route.deterministic &&
+      palette !== undefined &&
+      tree !== undefined &&
+      frame !== undefined &&
+      screenId !== undefined ? (
         <ReviewOverlay
           session={session}
           screen={screenId}
@@ -589,8 +614,8 @@ export function App() {
           breakpoint={breakpointName}
           {...(appliedState === undefined ? {} : { state: appliedState })}
           {...(variantIdentity === undefined ? {} : { variant: variantIdentity })}
-          overlays={overlayList}
-          tabs={tabSelections}
+          theme={theme?.name ?? 'base'}
+          {...reviewState}
           frame={frameElement}
           {...(treeFingerprint === undefined ? {} : { fingerprint: treeFingerprint })}
           barHost={barHost}

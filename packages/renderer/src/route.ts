@@ -22,6 +22,7 @@ export interface PreviewRoute {
   readonly breakpoint?: string
   /** Named screen state requested by the state query parameter. */
   readonly state?: string
+  readonly theme?: string
   /** Optional authored situation identity, in addition to its render selectors. */
   readonly situation?: string
   readonly deterministic: boolean
@@ -43,6 +44,7 @@ export interface PreviewRoute {
 export interface RouteUrlOptions {
   readonly breakpoint?: string
   readonly state?: string
+  readonly theme?: string
   /** Optional authored situation identity, in addition to its render selectors. */
   readonly situation?: string
   readonly deterministic?: boolean
@@ -96,6 +98,7 @@ export function parseRoute(pathname: string, search: string): PreviewRoute {
     ...(screen === undefined || screen === '' ? {} : { screen }),
     breakpoint: params.get('bp') ?? undefined,
     state: params.get('state') ?? undefined,
+    theme: params.get('theme') ?? undefined,
     situation: params.get('situation') ?? undefined,
     deterministic: params.get('deterministic') === '1',
     ...(variant === undefined ? {} : { variant }),
@@ -148,6 +151,7 @@ export function buildRouteUrl(screen: string | undefined, options: RouteUrlOptio
   const params = new URLSearchParams()
   if (options.breakpoint !== undefined && options.breakpoint !== '') params.set('bp', options.breakpoint)
   if (options.state !== undefined && options.state !== '') params.set('state', options.state)
+  if (options.theme !== undefined) params.set('theme', options.theme)
   if (options.situation !== undefined && options.situation !== '') params.set('situation', options.situation)
   if (options.variant !== undefined) {
     params.set('variant', options.variant.group + ':' + options.variant.branch)
@@ -177,6 +181,7 @@ export function routeWith(screen: string | undefined, overrides: RouteUrlOptions
   return buildRouteUrl(screen ?? route.screen, {
     breakpoint: overrides.breakpoint ?? route.breakpoint,
     state: overrides.state ?? route.state,
+    theme: overrides.theme ?? route.theme,
     situation: overrides.situation ?? route.situation,
     deterministic: overrides.deterministic ?? route.deterministic,
     ...(overrides.variant === undefined
@@ -210,6 +215,7 @@ export function routeUrl(screen: string, breakpoint?: string, deterministic = fa
     ...(breakpoint === undefined || breakpoint === '' ? {} : { breakpoint }),
     ...(state === undefined || state === '' ? {} : { state }),
     deterministic,
+    theme: getRoute().theme,
   })
 }
 
@@ -225,6 +231,7 @@ export function navigateRoute(screen: string, breakpoint?: string, state?: strin
   pushRoute(
     buildRouteUrl(screen, {
       breakpoint: breakpoint ?? route.breakpoint,
+      theme: route.theme,
       ...(state === undefined ? {} : { state }),
       deterministic: route.deterministic,
       ...(sameScreen && route.variant !== undefined ? { variant: route.variant } : {}),
@@ -233,6 +240,13 @@ export function navigateRoute(screen: string, breakpoint?: string, state?: strin
       ...(route.pane === undefined ? {} : { pane: route.pane }),
     }),
   )
+}
+
+/** Select a palette without changing other route coordinates. */
+export function selectTheme(theme: string): void {
+  const url = new URL(location.href)
+  url.searchParams.set('theme', theme)
+  pushRoute(url.pathname + url.search)
 }
 
 /** Select one configured breakpoint, preserving variant and comparison state. */
@@ -268,6 +282,7 @@ export function setCompareRoute(
   pushRoute(
     buildRouteUrl(screen, {
       breakpoint: options.breakpoint,
+      theme: getRoute().theme,
       ...(options.state === undefined || options.state === '' ? {} : { state: options.state }),
       compare,
       deterministic: getRoute().deterministic,

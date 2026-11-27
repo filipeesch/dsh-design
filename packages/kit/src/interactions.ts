@@ -4,7 +4,10 @@ import { useDesign } from './context.tsx'
 
 /** Execute one interaction reference against the environment. */
 export function runInteraction(ref: InteractionRef): void {
-  const env = useDesign()
+  dispatchInteraction(useDesign(), ref)
+}
+
+function dispatchInteraction(env: ReturnType<typeof useDesign>, ref: InteractionRef): void {
   switch (ref.$interaction) {
     case 'open':
       env.openOverlay(ref.target)
@@ -27,25 +30,17 @@ export function useInteraction(node: DesignElement, name: string): InteractionRe
   return isInteraction(value) ? value : undefined
 }
 
+/** Dispatch a validated interaction from an event handler, including option actions. */
+export function useDispatchInteraction(): (ref: InteractionRef | undefined) => void {
+  const env = useDesign()
+  return (ref) => {
+    if (ref !== undefined) dispatchInteraction(env, ref)
+  }
+}
+
 /** Return a click handler for an event prop, or a no-op when absent. */
 export function useAct(node: DesignElement, name: string): () => void {
-  const env = useDesign()
+  const dispatch = useDispatchInteraction()
   const ref = useInteraction(node, name)
-  return () => {
-    if (ref === undefined) return
-    switch (ref.$interaction) {
-      case 'open':
-        env.openOverlay(ref.target)
-        break
-      case 'close':
-        env.closeOverlay(ref.target)
-        break
-      case 'toggle':
-        env.toggleOverlay(ref.target)
-        break
-      case 'navigate':
-        env.navigate(ref.target)
-        break
-    }
-  }
+  return () => dispatch(ref)
 }

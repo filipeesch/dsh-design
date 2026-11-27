@@ -105,7 +105,9 @@ export function useSurfaceStyle(node: DesignElement): CSSProperties {
 /** Accessibility and traceability attributes carried by every node wrapper. */
 export function nodeAttributes(node: DesignElement): Record<string, string> {
   return {
-    ...(typeof node.props.css === 'string' && node.props.css !== '' ? { className: cssClassForNode(node) } : {}),
+    ...(node.classCss !== undefined || (typeof node.props.css === 'string' && node.props.css !== '')
+      ? { className: cssClassForNode(node) }
+      : {}),
     'data-dsx-type': node.type,
     ...(node.id === undefined || node.id === ''
       ? { 'data-dsx-address': node.address.label }

@@ -15,6 +15,7 @@ import {
   Tab,
   Disclosure,
 } from './controls.tsx'
+import { SelectButton, SplitButton, ToggleButton } from './action-controls.tsx'
 import { Drawer, Modal, Popover, Tooltip, Toast, Menu } from './overlays.tsx'
 import {
   Card,
@@ -28,6 +29,8 @@ import {
   Progress,
   Skeleton,
   EmptyState,
+  CodeBlock,
+  Callout,
 } from './content.tsx'
 
 /** Every component keyed by DSL name. */
@@ -72,6 +75,11 @@ export const kitComponents = {
   Progress,
   Skeleton,
   EmptyState,
+  CodeBlock,
+  Callout,
+  ToggleButton,
+  SelectButton,
+  SplitButton,
 } as const
 
 export type KitComponentName = keyof typeof kitComponents

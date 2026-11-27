@@ -91,13 +91,14 @@ describe('visual evidence contracts', () => {
       ['design_screenshot', { screen: 'home', device: 'mobile' }],
     ] as const)
       await expect(callTool(h, name, args, h.root)).rejects.toThrow('unknown argument')
-    await expect(callTool(h, 'design_lint', { screen: 'home', breakpoint: 'unknown' }, h.root)).rejects.toThrow(
-      'Unknown breakpoint',
-    )
-    await expect(callTool(h, 'design_lint', { screen: 'home', variant: '' }, h.root)).rejects.toThrow('group:branch')
-    await expect(callTool(h, 'design_screenshot', { screen: 'home', state: 'focused' }, h.root)).rejects.toThrow(
-      'does not declare state',
-    )
+    for (const [name, args, message] of [
+      ['design_lint', { screen: 'home', breakpoint: 'unknown' }, 'Unknown breakpoint'],
+      ['design_lint', { screen: 'home', variant: '' }, 'group:branch'],
+      ['design_screenshot', { screen: 'home', state: 'focused' }, 'does not declare state'],
+    ] as const) {
+      const result = await callTool(h, name, args, h.root)
+      expect(result).toMatchObject({ errorCode: 'invalid-selection', error: expect.stringContaining(message) })
+    }
     expect(
       await callTool(h, 'design_view', { screen: 'home', breakpoint: 'mobile', node: 'not-found' }, h.root),
     ).toMatchObject({ errorCode: 'invalid-selection' })
@@ -159,6 +160,7 @@ describe('visual evidence contracts', () => {
       const args = { screen: 'home', breakpoint: 'mobile' }
       await writeScreen(h.root, 'home.dsx', source(' initials="Unable-to-render-this-intentionally-long-icon-label"'))
       const first = await callTool(h, 'design_lint', args, h.root)
+      expect(first.error, 'The media measurement must complete in Chromium.').toBeUndefined()
       expect(first.media).toMatchObject([
         { code: 'unsupported', node: 'icon', reference: 'media/icon.svg', file: 'screens/home.dsx' },
         { code: 'missing', node: 'missing', reference: 'media/absent.png' },
@@ -192,6 +194,7 @@ describe('visual evidence contracts', () => {
         '<Screen id="home"><Avatar id="icon" src="media/' + file + '" initials="A-very-long-fallback-name" /></Screen>',
       )
       const result = await callTool(h, 'design_lint', { screen: 'home', breakpoint: 'mobile' }, h.root)
+      expect(result.error, 'The avatar measurement must complete in Chromium.').toBeUndefined()
       expect(result.media).toMatchObject([{ code, node: 'icon', reference: 'media/' + file }])
       expect(result.findings).toEqual([])
     }
@@ -224,9 +227,11 @@ describe('visual evidence contracts', () => {
       }
       exec.agent.session.requestHeader = () => ({ config: { provider: 'current', model: 'vision' } })
       const lint = await callTool(h, 'design_lint', { screen: 'home', breakpoint: 'desktop' }, h.root)
+      expect(lint.error).toBeUndefined()
       expect(lint.findings).toEqual([])
       expect(saveImage).not.toHaveBeenCalled()
       const inline = await capture.execute(args, exec)
+      expect(inline.error, 'The screenshot must be persisted before checking attachment delivery.').toBeUndefined()
       expect(resolveModelInfo).toHaveBeenCalledWith('current', 'vision', exec.signal)
       expect(inline).toMatchObject({
         imageDelivery: 'inline',

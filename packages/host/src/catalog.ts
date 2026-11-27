@@ -1,16 +1,23 @@
 /** Model-facing references: derive component details from the kit and curate actual DSX examples. */
 import { editDistance, propsOf, type PropMeta } from '@filipeesch/dsh-design-core'
 import { componentNames, kitMetadata } from '@filipeesch/dsh-design-kit/meta'
+import { makeIntentSearch } from './catalog-intent.ts'
+import { compositionReferences } from './catalog-recipes.ts'
 
 export const MAX_CATALOG_NAMES = 8
+export const MAX_CATALOG_QUERY_LENGTH = 160
 const MAX_NAME_LENGTH = 80
 
 type CatalogKind = 'component' | 'construct' | 'recipe'
-type ExampleContext = 'screen-child' | 'tabs-child' | 'screen-file' | 'journey-file' | 'preview-file'
-interface CatalogEntry {
+type ExampleContext = 'screen-child' | 'screen-file' | 'journey-file' | 'preview-file'
+export interface CatalogSummary {
   readonly name: string
   readonly description: string
   readonly kind: CatalogKind
+}
+
+export interface CatalogEntry extends CatalogSummary {
+  readonly related?: readonly string[]
   readonly props?: readonly PropMeta[]
   readonly exampleContext: ExampleContext
   readonly example: string
@@ -27,7 +34,7 @@ const variantExample = `<Variants id="layout" chosen="compact">
   <Variant branch="spacious"><Card><Text>Spacious view</Text></Card></Variant>
 </Variants>`
 const disclosureScreen = `<Screen id="home" title="Help" states={{ "details-open": { disclosures: { details: true } } }}>
-  <Disclosure id="details" label="Delivery details"><Text>Allow two days.</Text></Disclosure>
+  <Disclosure id="details" label="Delivery details" expandedLabel="Hide delivery details"><Text>Allow two days.</Text></Disclosure>
 </Screen>`
 const detailsFile = '<Screen id="details" title="Details"><Text>Here are the details.</Text></Screen>'
 const references: readonly CatalogEntry[] = [
@@ -113,6 +120,7 @@ const references: readonly CatalogEntry[] = [
 }`,
     exampleFiles: { 'screens/home.dsx': disclosureScreen },
   },
+  ...compositionReferences,
 ]
 
 const components = componentNames.map((name) => {
@@ -123,6 +131,54 @@ const referenceIndex = (kind: CatalogKind) =>
   references.filter((entry) => entry.kind === kind).map(({ name, description }) => ({ name, description }))
 const index = { components, constructs: referenceIndex('construct'), recipes: referenceIndex('recipe') }
 const byName = new Map(references.map((entry) => [entry.name, entry]))
+const search = makeIntentSearch([
+  ...components.map(({ name, description, category }) => ({ name, description, category, kind: 'component' as const })),
+  ...references.map(({ name, description, kind }) => ({ name, description, kind })),
+])
+
+// Curated links use exact lookup names, not fuzzy aliases, and do not expand the linked examples.
+const relatedNames = new Map<string, readonly string[]>([
+  ['Screen', ['Layout', 'states', 'themes', 'shared-sidebar']],
+  ['Layout', ['ContentSlot', 'shared-sidebar']],
+  ['ContentSlot', ['Layout', 'shared-sidebar']],
+  ['styleClass', ['themes']],
+  ['themes', ['Screen', 'styleClass']],
+  ['shared-sidebar', ['Layout', 'ContentSlot', 'screen-navigation', 'responsive-layout']],
+  ['responsive-layout', ['Stack', 'shared-sidebar', 'action-bar']],
+  ['screen-navigation', ['Button', 'Journey', 'shared-sidebar']],
+  ['Button', ['action-bar', 'screen-navigation', 'filter-drawer', 'SplitButton']],
+  ['Input', ['action-bar', 'states']],
+  ['Stack', ['responsive-layout', 'action-bar']],
+  ['action-bar', ['Input', 'Stack', 'Button']],
+  ['Drawer', ['filter-drawer', 'states']],
+  ['filter-drawer', ['Drawer', 'states', 'Select', 'Journey']],
+  ['states', ['filter-drawer', 'named-disclosure', 'view-controls']],
+  ['Table', ['fixture-table', 'fixture']],
+  ['fixture-table', ['Table', 'fixture', 'ItemTemplate']],
+  ['fixture', ['fixture-table', 'ItemTemplate', 'item']],
+  ['ItemTemplate', ['List', 'fixture', 'item']],
+  ['item', ['ItemTemplate', 'fixture']],
+  ['List', ['ItemTemplate', 'fixture']],
+  ['Select', ['fixture', 'SelectButton']],
+  ['CodeBlock', ['inline-feedback', 'Callout']],
+  ['Callout', ['inline-feedback', 'CodeBlock', 'Toast']],
+  ['inline-feedback', ['Callout', 'CodeBlock']],
+  ['ToggleButton', ['view-controls', 'Switch', 'states']],
+  ['SelectButton', ['view-controls', 'Select', 'states']],
+  ['Switch', ['view-controls', 'ToggleButton']],
+  ['view-controls', ['ToggleButton', 'SelectButton', 'Switch', 'states']],
+  ['Popover', ['anchored-actions', 'SplitButton']],
+  ['SplitButton', ['anchored-actions', 'Popover', 'Journey']],
+  ['anchored-actions', ['Popover', 'SplitButton', 'Toast', 'Journey']],
+  ['Disclosure', ['named-disclosure', 'states']],
+  ['named-disclosure', ['Disclosure', 'states', 'preview-context']],
+  ['preview-context', ['states', 'named-disclosure']],
+  ['Tabs', ['Tab', 'states', 'Journey']],
+  ['Tab', ['Tabs', 'Journey']],
+  ['Journey', ['states', 'themes', 'filter-drawer']],
+  ['Variant', ['Variants']],
+  ['Variants', ['Variant']],
+])
 
 const strings = { type: 'array', items: { type: 'string' } }
 const indexedEntries = {
@@ -136,10 +192,14 @@ const indexedEntries = {
     },
   },
 }
-const lookupProperties = {
+const summaryProperties = {
   name: { type: 'string' },
   kind: { type: 'string', enum: ['component', 'construct', 'recipe'] },
   description: { type: 'string' },
+}
+const lookupProperties = {
+  ...summaryProperties,
+  related: strings,
   props: { type: 'array', items: { type: 'object', additionalProperties: true, properties: {} } },
   example: { type: 'string' },
   exampleContext: { type: 'string' },
@@ -156,6 +216,11 @@ export const catalogOutputSchema = {
     components: indexedEntries,
     constructs: indexedEntries,
     recipes: indexedEntries,
+    query: { type: 'string' },
+    matches: {
+      type: 'array',
+      items: { type: 'object', additionalProperties: false, properties: summaryProperties },
+    },
     results: {
       type: 'array',
       items: {
@@ -173,23 +238,30 @@ interface CatalogMiss {
 }
 
 type CatalogLookup = CatalogEntry | CatalogMiss
-type CatalogResult = typeof index | CatalogLookup | { results: readonly ({ requested: string } & CatalogLookup)[] }
+type CatalogResult =
+  | typeof index
+  | CatalogLookup
+  | { results: readonly ({ requested: string } & CatalogLookup)[] }
+  | { query: string; matches: readonly CatalogSummary[] }
 
 function lookup(name: string, batch: boolean): CatalogLookup {
+  const related = relatedNames.get(name)
+  const links = related === undefined ? {} : { related }
   if (Object.hasOwn(kitMetadata, name)) {
     const meta = kitMetadata[name]!
     return {
       name: meta.name,
       description: meta.description,
       kind: 'component',
+      ...links,
       props: propsOf(meta),
       example: meta.example,
-      exampleContext: name === 'Screen' ? 'screen-file' : name === 'Tab' ? 'tabs-child' : 'screen-child',
+      exampleContext: name === 'Screen' ? 'screen-file' : 'screen-child',
       ...(name === 'Button' ? { exampleFiles: { 'screens/details.dsx': detailsFile } } : {}),
     }
   }
   const reference = byName.get(name)
-  if (reference !== undefined) return reference
+  if (reference !== undefined) return { ...reference, ...links }
   // Keep the single-name component error and component-only matches for legacy callers.
   const candidates = batch ? [...componentNames, ...byName.keys()] : componentNames
   const closest = candidates
@@ -200,8 +272,20 @@ function lookup(name: string, batch: boolean): CatalogLookup {
   return { error: 'Unknown ' + (batch ? 'catalog entry ' : 'component ') + JSON.stringify(name) + '.', closest }
 }
 
-export function designCatalog(args: { name?: string; names?: readonly string[] }): CatalogResult {
-  const { name, names } = args
+export function designCatalog(args: { name?: string; names?: readonly string[]; query?: string }): CatalogResult {
+  const { name, names, query } = args
+  if (query !== undefined) {
+    if (name !== undefined || names !== undefined)
+      throw new Error('design_catalog: use query alone, not with name or names')
+    if (typeof query !== 'string' || query.length > MAX_CATALOG_QUERY_LENGTH || query.trim() === '') {
+      throw new Error(
+        'design_catalog: query must be a non-blank string of at most ' +
+          String(MAX_CATALOG_QUERY_LENGTH) +
+          ' characters',
+      )
+    }
+    return { query: query.trim(), matches: search(query) }
+  }
   if (name !== undefined && names !== undefined) throw new Error('design_catalog: use either name or names, not both')
   if (names !== undefined && (names.length < 1 || names.length > MAX_CATALOG_NAMES)) {
     throw new Error('design_catalog: names must contain 1–' + String(MAX_CATALOG_NAMES) + ' entries')
@@ -216,7 +300,6 @@ export function designCatalog(args: { name?: string; names?: readonly string[] }
 
 const contexts: Readonly<Record<ExampleContext, string>> = {
   'screen-child': 'inside a Screen in design/screens/*.dsx',
-  'tabs-child': 'inside a Tabs with an id, within a Screen',
   'screen-file': 'complete design/screens/*.dsx file',
   'journey-file': 'complete design/journeys/*.dsx file',
   'preview-file': 'complete design/preview.json file',
@@ -246,6 +329,7 @@ function formatLookup(entry: CatalogLookup): string {
   return [
     (entry.kind === 'component' ? '<' + entry.name + '>' : entry.name) + ' (' + entry.kind + ') — ' + entry.description,
     ...props,
+    ...(entry.related === undefined ? [] : ['', 'Related (exact names): ' + entry.related.join(', ')]),
     '',
     'Example (' + contexts[entry.exampleContext] + '):',
     entry.example,
@@ -254,6 +338,14 @@ function formatLookup(entry: CatalogLookup): string {
 }
 
 export function formatCatalog(value: CatalogResult): string {
+  if ('matches' in value) {
+    if (value.matches.length === 0)
+      return 'No relevant catalog match. Try different Portuguese or English terms, or call with no arguments for the index.'
+    return [
+      'Catalog matches (use name or names for details):',
+      ...value.matches.map(({ name, kind, description }) => name + ' (' + kind + ') — ' + description),
+    ].join('\n')
+  }
   if ('results' in value) return value.results.map(formatLookup).join('\n\n')
   if (!('components' in value)) return formatLookup(value)
   const lines = (entries: readonly { name: string; description: string }[]) =>

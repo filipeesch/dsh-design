@@ -7,7 +7,6 @@ import { expandScreen } from '../src/fixtures.ts'
 import { parseJourney, validateJourney } from '../src/journey.ts'
 import { parseScreen } from '../src/parse.ts'
 import { loadProject } from '../src/project.ts'
-import { canonicalState, renderNamedStates } from '../src/handoff.ts'
 import { extractNamedStates, stateCompatibility } from '../src/state.ts'
 import { projectScreen } from '../src/view.ts'
 import type { DesignChild, DesignElement } from '../src/types.ts'
@@ -282,7 +281,7 @@ describe('fixtures and collection binding', () => {
     expect(JSON.stringify(root)).toContain('Inline row')
   })
 
-  it('seeds independent fixture-expanded disclosure ids and round-trips boolean seeds', async () => {
+  it('seeds independent fixture-expanded disclosure ids and keeps boolean seeds after reordering', async () => {
     const { folder } = await project()
     const path = join(folder, 'screens', 'orders.dsx')
     await writeFixtures(folder)
@@ -297,12 +296,9 @@ describe('fixtures and collection binding', () => {
     const states = first.screens[0]!.states
     expect(states[0]?.disclosures).toEqual({ 'rows-order-2-details': true, 'rows-order-1-details': false })
     await writeFixtures(folder, [...orders].reverse())
-    await writeFile(path, source.replace(/states={.*?}>/, 'states={' + renderNamedStates(states) + '}>'))
     const second = await load(folder)
     expect(second.diagnostics).toEqual([])
-    expect(JSON.stringify(second.screens[0]!.states.map(canonicalState))).toBe(
-      JSON.stringify(states.map(canonicalState)),
-    )
+    expect(second.screens[0]!.states[0]?.disclosures).toEqual(states[0]?.disclosures)
   })
 
   it('keeps repeated identities stable across fixture reordering', async () => {

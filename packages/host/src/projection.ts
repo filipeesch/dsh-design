@@ -1,18 +1,15 @@
 /** Resolve a chosen or explicitly selected variant projection for tools and checks. */
 import {
   countDiagnostics,
-  expandScreen,
-  extractNamedStates,
   findNamedState,
-  resolveVariantDocument,
+  formatDiagnostic,
   stateCompatibility,
-  validateTree,
   type DesignProject,
   type Diagnostic,
   type NamedState,
   type ProjectScreen,
 } from '@filipeesch/dsh-design-core'
-import { KIT_VERSION, kitMetadata } from '@filipeesch/dsh-design-kit/meta'
+import { kitMetadata } from '@filipeesch/dsh-design-kit/meta'
 
 /** One effective variant identity carried by a tool result. */
 export interface ResolvedVariant {
@@ -32,24 +29,12 @@ export interface ResolvedProjection {
 
 /** Parse a tool-level variant argument (group:branch) with a bounded shape. */
 export function parseVariantArgument(value: string | undefined): { group: string; branch: string } | undefined {
-  if (value === undefined || value === '') return undefined
+  if (value === undefined) return undefined
   const index = value.lastIndexOf(':')
   if (index <= 0 || index === value.length - 1) {
     throw new Error('variant must be "group:branch", for example "layout:spacious".')
   }
   return { group: value.slice(0, index), branch: value.slice(index + 1) }
-}
-
-function projectionContext(project: DesignProject) {
-  return {
-    kit: kitMetadata,
-    tokens: project.tokens.tokens,
-    breakpoints: project.config.breakpoints.map((breakpoint) => breakpoint.name),
-    projectScreens: project.screens.filter((screen) => screen.id !== '').map((screen) => screen.id),
-    designFolder: project.folder,
-    kitVersionPin: project.config.kitVersion,
-    installedKitVersion: KIT_VERSION,
-  }
 }
 
 /**
@@ -119,42 +104,16 @@ export function resolveScreenProjection(
             first.message),
     )
   }
-  const document = screen.variantDocument ?? screen.root
-  if (document === undefined) throw new Error('Screen "' + screenId + '" has no parsed document to project.')
-  const resolution = resolveVariantDocument(document, { [group.path]: branch.id })
-  if (resolution.screen === undefined) {
-    const first = resolution.diagnostics.find((diagnostic) => diagnostic.severity === 'error')
-    throw new Error('Variant projection failed: ' + (first?.message ?? 'the document did not resolve.'))
+  const snapshot = screen.variantSnapshots?.[group.path + '|' + branch.id]
+  if (snapshot === undefined || branch.stale === true) {
+    throw new Error('Variant projection has no valid current snapshot.')
   }
-  const expanded = expandScreen(resolution.screen, screen.variantFixtures ?? project.fixtures, screen.file)
-  const states = extractNamedStates(expanded.root, screen.file, kitMetadata)
-  const semantic = validateTree(states.root, screen.file, projectionContext(project))
-  const wholeScreen = document.type === 'Variants'
-  const diagnostics = [
-    ...resolution.diagnostics,
-    ...expanded.diagnostics,
-    ...(wholeScreen ? states.diagnostics : []),
-    ...semantic,
-  ]
-  const errors = countDiagnostics(diagnostics).errors
-  if (errors > 0) {
-    const first = diagnostics.find((diagnostic) => diagnostic.severity === 'error')
-    throw new Error(
-      'Variant group "' +
-        group.path +
-        '" branch "' +
-        branch.id +
-        '" is invalid: ' +
-        (first === undefined
-          ? 'unknown error'
-          : first.file + ':' + String(first.line) + ':' + String(first.column) + ' ' + first.message),
-    )
-  }
+  const diagnostics = snapshot.diagnostics
   return {
     screen: {
       ...screen,
-      root: states.root,
-      ...(wholeScreen ? { states: states.states } : {}),
+      root: snapshot.root,
+      states: snapshot.states,
       blockingErrors: 0,
       diagnostics,
     },
@@ -163,10 +122,34 @@ export function resolveScreenProjection(
       path: group.path,
       branch: branch.id,
       chosen: branch.id === group.chosen,
-      selection: resolution.selection,
+      selection: snapshot.selection,
     },
     diagnostics,
   }
+}
+
+/** Test the chosen tree, independent of retained snapshots for other branches. */
+export function hasCurrentProjection(screen: ProjectScreen): boolean {
+  return screen.root !== undefined && (screen.blockingErrors ?? countDiagnostics(screen.diagnostics).errors) === 0
+}
+
+/** Resolve a projection suitable for current queries and browser evidence. */
+export function requireCurrentProjection(project: DesignProject, id: string, variant?: string): ResolvedProjection {
+  const projection = resolveScreenProjection(project, id, variant)
+  const { screen } = projection
+  if (hasCurrentProjection(screen)) return projection
+  const first =
+    screen.diagnostics.find((diagnostic) => diagnostic.severity === 'error' && diagnostic.branch === undefined) ??
+    screen.diagnostics.find((diagnostic) => diagnostic.severity === 'error')
+  throw new Error(
+    'Screen "' +
+      id +
+      '" ' +
+      (screen.root === undefined && first === undefined
+        ? 'has no parsed tree; fix its diagnostics first.'
+        : 'has validation errors; fix them first.' +
+          (first === undefined ? '' : ' First error: ' + formatDiagnostic(first))),
+  )
 }
 
 /** Resolve a named state against one projection, reporting incompatible targets. */

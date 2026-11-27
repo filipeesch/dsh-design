@@ -310,6 +310,12 @@ const definitions: ComponentMeta[] = [
         default: 'text',
         description: 'Native input type.',
       },
+      {
+        name: 'grow',
+        kind: 'boolean',
+        default: false,
+        description: 'Fill the remaining row space; accepts breakpoint values.',
+      },
       { name: 'disabled', kind: 'boolean', description: 'Disable the input.' },
       { name: 'onChange', kind: 'event', description: 'Interaction reference fired on change.' },
     ],
@@ -372,10 +378,50 @@ const definitions: ComponentMeta[] = [
     props: [
       { name: 'label', kind: 'string', description: 'Switch label.' },
       { name: 'checked', kind: 'boolean', description: 'Initial state.' },
+      {
+        name: 'appearance',
+        kind: 'enum',
+        values: ['native', 'track'],
+        default: 'native',
+        description: 'Opt into a visual switch track.',
+      },
       { name: 'disabled', kind: 'boolean', description: 'Disable the switch.' },
       { name: 'onChange', kind: 'event', description: 'Interaction reference fired on change.' },
     ],
     example: '<Switch id="notifications" label="Notifications" />',
+  }),
+  component('ToggleButton', 'Pressable setting that switches a boolean value on or off.', 'form', 2, {
+    interactive: true,
+    role: 'button',
+    props: [
+      { name: 'label', kind: 'string', required: true, description: 'Visible and accessible button label.' },
+      { name: 'pressed', kind: 'boolean', default: false, description: 'Initial pressed value.' },
+      { name: 'disabled', kind: 'boolean', default: false, description: 'Disable the button.' },
+      { name: 'onChange', kind: 'event', description: 'Interaction reference fired on change.' },
+    ],
+    example: '<ToggleButton id="pin" label="Pin" />',
+  }),
+  component('SelectButton', 'Segmented single-choice control for a small set of options.', 'form', 2, {
+    interactive: true,
+    role: 'radiogroup',
+    props: [
+      { name: 'label', kind: 'string', required: true, description: 'Accessible name for the group.' },
+      {
+        name: 'options',
+        kind: 'array',
+        required: true,
+        description: '1–24 options with unique stable value, label, and optional boolean disabled.',
+      },
+      {
+        name: 'value',
+        kind: 'string',
+        description: 'Initially selected option; defaults to the first enabled option.',
+      },
+      { name: 'disabled', kind: 'boolean', default: false, description: 'Disable all options.' },
+      { name: 'onChange', kind: 'event', description: 'Interaction reference fired when selection changes.' },
+    ],
+    example:
+      '<SelectButton id="mode" label="View mode" options={[{ value: "grid", label: "Grid" }, { value: "list", label: "List" }]} />',
   }),
   component('Tabs', 'Tab list that switches its panels.', 'navigation', 1, {
     requiredId: true,
@@ -391,16 +437,17 @@ const definitions: ComponentMeta[] = [
     example:
       '<Tabs id="sections" value="overview">\n  <Tab id="tab-overview" label="Overview" value="overview">\n    <Text>Overview panel</Text>\n  </Tab>\n</Tabs>',
   }),
-  component('Tab', 'One tab and its panel.', 'navigation', 1, {
+  component('Tab', 'One targetable tab trigger and its separately linked panel.', 'navigation', 1, {
     requiredId: true,
     interactive: true,
     children: 'any',
-    role: 'tabpanel',
+    role: 'tab',
     props: [
       { name: 'label', kind: 'string', required: true, description: 'Tab label.' },
       { name: 'value', kind: 'string', description: 'Stable tab value.' },
     ],
-    example: '<Tab id="tab-overview" label="Overview" value="overview">\n  <Text>Panel</Text>\n</Tab>',
+    example:
+      '<Tabs id="sections"><Tab id="tab-overview" label="Overview" value="overview"><Text>Panel</Text></Tab></Tabs>',
   }),
   component('Disclosure', 'Labeled toggle that reveals its own content inline.', 'layout', 1, {
     requiredId: true,
@@ -409,6 +456,7 @@ const definitions: ComponentMeta[] = [
     role: 'button',
     props: [
       { name: 'label', kind: 'string', required: true, description: 'Visible and accessible label for the toggle.' },
+      { name: 'expandedLabel', kind: 'string', description: 'Label while expanded; defaults to the ordinary label.' },
       { name: 'defaultOpen', kind: 'boolean', default: false, description: 'Start with the content expanded.' },
     ],
     example: '<Disclosure id="price-details" label="Price details"><Text>Totals include tax.</Text></Disclosure>',
@@ -490,6 +538,60 @@ const definitions: ComponentMeta[] = [
 ]
 
 const tierTwo: ComponentMeta[] = [
+  component('CodeBlock', 'Literal monospace code and logs with preserved indentation and line breaks.', 'content', 2, {
+    props: [
+      {
+        name: 'text',
+        kind: 'string',
+        required: true,
+        description: 'Literal text, up to 16,384 characters; use a quoted string expression with newline escapes.',
+      },
+      {
+        name: 'wrap',
+        kind: 'boolean',
+        default: false,
+        description: 'Wrap long lines instead of scrolling inside the block.',
+      },
+    ],
+    example: '<CodeBlock text={"Build output:\\n  Ready"} />',
+  }),
+  component('Callout', 'Persistent inline feedback, status, or warning with a heading.', 'content', 2, {
+    children: 'any',
+    props: [
+      { name: 'title', kind: 'string', required: true, description: 'Callout title.' },
+      {
+        name: 'tone',
+        kind: 'enum',
+        values: ['info', 'success', 'warning', 'danger'],
+        default: 'info',
+        description: 'Semantic foreground and background tone.',
+      },
+    ],
+    example: '<Callout title="Review needed" tone="warning"><Text>The last sync could not complete.</Text></Callout>',
+  }),
+  component('SplitButton', 'Primary action beside a menu of independent alternative actions.', 'overlay', 2, {
+    interactive: true,
+    role: 'group',
+    props: [
+      { name: 'label', kind: 'string', required: true, description: 'Primary button label.' },
+      {
+        name: 'menuLabel',
+        kind: 'string',
+        default: 'More actions',
+        description: 'Accessible name of the menu button.',
+      },
+      { name: 'disabled', kind: 'boolean', default: false, description: 'Disable both buttons.' },
+      { name: 'onClick', kind: 'event', required: true, description: 'Interaction reference for the primary button.' },
+      {
+        name: 'options',
+        kind: 'array',
+        required: true,
+        description: '1–24 alternatives: stable value, label, optional boolean disabled, and onClick interaction.',
+      },
+    ],
+    example:
+      '<Stack><SplitButton id="save" label="Save" onClick={open("saved")} options={[{ value: "draft", label: "Save draft", onClick: open("draft") }]} /><Toast id="saved" message="Saved" /><Toast id="draft" message="Draft saved" /></Stack>',
+  }),
   component('Avatar', 'User avatar from a local image or initials.', 'content', 2, {
     props: [
       { name: 'src', kind: 'image', description: 'Path inside the design folder, or "placeholder: description".' },
@@ -555,6 +657,7 @@ const tierTwo: ComponentMeta[] = [
     role: 'dialog',
     props: [
       { name: 'title', kind: 'string', description: 'Popover heading.' },
+      { name: 'anchor', kind: 'string', description: 'Stable ID of another node on this screen; omit to center.' },
       padding,
       background,
       { name: 'onClose', kind: 'event', description: 'Interaction reference fired when dismissed.' },

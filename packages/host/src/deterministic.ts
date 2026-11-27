@@ -115,6 +115,13 @@ async function readRasterAssets(folder: string, paths: readonly string[]) {
       continue
     }
     const buffer = await readFile(real).catch(() => undefined)
+    if (
+      buffer !== undefined &&
+      (buffer.length > MAX_DETERMINISTIC_FILE_BYTES || total + buffer.length > MAX_DETERMINISTIC_MEDIA_BYTES)
+    ) {
+      failures.set(path, 'unsupported')
+      continue
+    }
     if (buffer === undefined || sniffRaster(buffer) === undefined) {
       failures.set(path, 'undecodable')
       continue
@@ -142,9 +149,8 @@ export async function collectAssetsForRoots(
   return (await readRasterAssets(folder, referencedAssetPaths(roots))).assets
 }
 
-/** Media used by the resolved tree, even where missing media produces only fallback text. */
-export async function collectSelectedMedia(
-  folder: string,
+/** Media references selected by one resolved breakpoint. */
+function selectedReferences(
   root: DesignScreenNode,
   file: string,
   breakpoints: readonly Breakpoint[],
@@ -165,7 +171,7 @@ export async function collectSelectedMedia(
         !/^[a-z][a-z0-9+.-]*:/i.test(reference) &&
         !reference.split('/').some((part) => part === '..' || part === '.cache')
       references.push({
-        file,
+        file: node.source.file ?? file,
         line: node.source.line,
         column: node.source.column,
         ...(identity === undefined ? {} : { node: identity }),
@@ -182,17 +188,50 @@ export async function collectSelectedMedia(
     for (const child of node.children) visit(child)
   }
   visit(root)
-  const paths = new Set(
-    references.flatMap(({ reference }) => {
+  return references
+}
+
+/** Capture all requested breakpoint assets once, then reuse those exact bytes. */
+export async function collectMediaSnapshot(
+  folder: string,
+  root: DesignScreenNode,
+  file: string,
+  breakpoints: readonly Breakpoint[],
+  names: readonly string[],
+) {
+  const byBreakpoint = new Map(
+    [...new Set(names)].map((name) => [name, selectedReferences(root, file, breakpoints, name)]),
+  )
+  const paths = new Set<string>()
+  for (const references of byBreakpoint.values()) {
+    for (const { reference } of references) {
       const path = assetPath(reference)
-      return path === undefined ? [] : [path]
-    }),
-  )
-  const { assets, failures } = await readRasterAssets(
+      if (path !== undefined) paths.add(path)
+    }
+  }
+  const snapshot = await readRasterAssets(
     folder,
-    [...paths].sort((left, right) => left.localeCompare(right)),
+    [...paths].sort((a, b) => a.localeCompare(b)),
   )
-  return { assets, references, failures, breakpoint }
+  return {
+    assets: snapshot.assets,
+    at(breakpoint: string) {
+      const references = byBreakpoint.get(breakpoint)
+      if (references === undefined) throw new Error('Breakpoint was not captured: ' + breakpoint)
+      return { ...snapshot, references, breakpoint }
+    },
+  }
+}
+
+/** Media used by one resolved tree and breakpoint. */
+export async function collectSelectedMedia(
+  folder: string,
+  root: DesignScreenNode,
+  file: string,
+  breakpoints: readonly Breakpoint[],
+  breakpoint: string,
+) {
+  return (await collectMediaSnapshot(folder, root, file, breakpoints, [breakpoint])).at(breakpoint)
 }
 
 type SelectedMedia = Awaited<ReturnType<typeof collectSelectedMedia>>

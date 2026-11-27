@@ -150,6 +150,25 @@ describe('comment batch formatting', () => {
     expect(parseCommentContext({ ...context, variant: 'bad\u0000id' }).ok).toBe(false)
   })
 
+  it('preserves explicit empty overlays and closed disclosures, distinct from unavailable data', () => {
+    const { overlays: _overlays, ...legacy } = context
+    const typed = {
+      ...legacy,
+      theme: 'dark',
+      variant: 'layout:spacious|density:compact',
+      disclosures: { filters: false },
+    }
+    expect(parseCommentContext({ ...typed, overlays: [] })).toMatchObject({
+      ok: true,
+      value: { overlays: [], disclosures: { filters: false } },
+    })
+    const absent = parseCommentContext(typed)
+    expect(absent.ok && Object.hasOwn(absent.value, 'overlays')).toBe(false)
+    expect(parseCommentContext({ ...typed, disclosures: { filters: 'false' } }).ok).toBe(false)
+    expect(formatCommentBatch([draft({ context: { ...typed, overlays: [] } })])).toContain('"open":[],"tabs":')
+    expect(formatCommentBatch([draft({ context: typed })])).not.toContain('"open":[]')
+  })
+
   it('returns an empty message for an empty batch', () => {
     expect(formatCommentBatch([])).toBe('')
   })

@@ -11,6 +11,21 @@ export const DEFAULT_BREAKPOINTS: readonly Breakpoint[] = [
 
 /** Names must be usable as a DSL identifier and a URL query value. */
 const BREAKPOINT_NAME = /^[a-z][a-z0-9-]*$/
+export const SOURCE_NAME = /^[a-z][a-z0-9-]{0,79}$/
+const MAX_THEMES = 16
+const MAX_STYLESHEETS = 16
+
+function declaredPath(value: unknown, directory: string, extension: string): value is string {
+  if (typeof value !== 'string' || value.length > 240 || !value.startsWith(directory + '/')) return false
+  const segments = value.slice(directory.length + 1).split('/')
+  return (
+    segments.length <= 8 &&
+    segments.every((segment, index) => {
+      if (index < segments.length - 1) return SOURCE_NAME.test(segment)
+      return segment.endsWith(extension) && SOURCE_NAME.test(segment.slice(0, -extension.length))
+    })
+  )
+}
 
 /** Parse and validate a `design.json` document. */
 export function parseConfig(source: string, file: string): { config: DesignConfig; diagnostics: Diagnostic[] } {
@@ -134,8 +149,58 @@ export function parseConfig(source: string, file: string): { config: DesignConfi
       entry = record.entry.trim()
     }
   }
+  function invalid(code: string, message: string): void {
+    diagnostics.push({ severity: 'error', code, file, line: 1, column: 1, message })
+  }
+  let themes: Record<string, string> | undefined
+  if (record.themes !== undefined) {
+    themes = {}
+    if (record.themes === null || typeof record.themes !== 'object' || Array.isArray(record.themes)) {
+      invalid('config-themes', 'design.json field "themes" must map theme names to local JSON files.')
+    } else {
+      const entries = Object.entries(record.themes)
+      if (entries.length > MAX_THEMES) invalid('config-themes', 'Declare at most 16 theme overrides.')
+      for (const [name, value] of entries.slice(0, MAX_THEMES)) {
+        if (!SOURCE_NAME.test(name) || name === 'base') {
+          invalid('config-theme-name', 'Theme names must be kebab-case; "base" is reserved.')
+        } else if (!declaredPath(value, 'themes', '.json')) {
+          invalid('config-theme-path', 'Theme "' + name + '" must use a project-relative JSON path under themes/.')
+        } else themes[name] = value
+      }
+    }
+  }
+  let defaultTheme: string | undefined
+  if (record.defaultTheme !== undefined) {
+    if (typeof record.defaultTheme !== 'string' || !SOURCE_NAME.test(record.defaultTheme)) {
+      invalid('config-default-theme', 'design.json field "defaultTheme" must name a declared theme or "base".')
+    } else {
+      defaultTheme = record.defaultTheme
+      if (defaultTheme !== 'base' && !Object.hasOwn(themes ?? {}, defaultTheme)) {
+        invalid('config-default-theme', 'Default theme "' + defaultTheme + '" is not declared.')
+      }
+    }
+  }
+  let stylesheets: string[] | undefined
+  if (record.stylesheets !== undefined) {
+    stylesheets = []
+    if (!Array.isArray(record.stylesheets)) {
+      invalid('config-stylesheets', 'design.json field "stylesheets" must be an ordered list of local CSS files.')
+    } else {
+      if (record.stylesheets.length > MAX_STYLESHEETS) invalid('config-stylesheets', 'Declare at most 16 stylesheets.')
+      for (const [index, value] of record.stylesheets.slice(0, MAX_STYLESHEETS).entries()) {
+        if (!declaredPath(value, 'styles', '.css')) {
+          invalid(
+            'config-stylesheet-path',
+            'stylesheets[' + index + '] must use a project-relative CSS path under styles/.',
+          )
+        } else if (stylesheets.includes(value)) {
+          invalid('config-stylesheet-path', 'Stylesheet "' + value + '" is declared more than once.')
+        } else stylesheets.push(value)
+      }
+    }
+  }
   for (const key of Object.keys(record)) {
-    if (key !== 'kitVersion' && key !== 'breakpoints' && key !== 'entry') {
+    if (!['kitVersion', 'breakpoints', 'entry', 'themes', 'defaultTheme', 'stylesheets'].includes(key)) {
       diagnostics.push({
         severity: 'warning',
         code: 'config-unknown-field',
@@ -146,7 +211,17 @@ export function parseConfig(source: string, file: string): { config: DesignConfi
       })
     }
   }
-  return { config: { kitVersion, breakpoints, ...(entry === undefined ? {} : { entry }) }, diagnostics }
+  return {
+    config: {
+      kitVersion,
+      breakpoints,
+      ...(entry === undefined ? {} : { entry }),
+      ...(themes === undefined ? {} : { themes }),
+      ...(defaultTheme === undefined ? {} : { defaultTheme }),
+      ...(stylesheets === undefined ? {} : { stylesheets }),
+    },
+    diagnostics,
+  }
 }
 
 /**

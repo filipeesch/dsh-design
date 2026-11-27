@@ -301,6 +301,23 @@ function parseElement(ctx: ParserContext, node: JSXElement, address: StructuralA
       continue
     }
     const key = attribute.name.type === 'JSXIdentifier' ? attribute.name.name : attribute.name.name.name
+    if (key === 'styleClass' || key === 'layout') {
+      const value = attribute.value
+      if (
+        value?.type !== 'StringLiteral' &&
+        !(value?.type === 'JSXExpressionContainer' && value.expression.type === 'StringLiteral')
+      ) {
+        report(
+          ctx,
+          attribute,
+          key === 'layout' ? 'layout-value' : 'style-class-value',
+          key + ' must be a literal string.',
+        )
+      }
+      if (Object.hasOwn(props, key)) {
+        report(ctx, attribute, 'duplicate-attribute', key + ' must be declared only once.')
+      }
+    }
     if (attribute.value !== null && attribute.value !== undefined && attribute.value.type === 'JSXElement') {
       report(ctx, attribute.value, 'expression-not-allowed', 'Elements are not allowed inside a prop value.')
       continue
@@ -406,7 +423,9 @@ function reportParseError(
  * @param source - file text.
  * @param file - project-relative path used in diagnostics.
  */
-export function parseScreen(source: string, file: string): ParsedScreen {
+function parseDocument(source: string, file: string, layout: boolean): ParsedScreen {
+  const documentName = layout ? 'layout' : 'screen'
+  const elementName = layout ? 'Layout' : 'Screen'
   const ctx: ParserContext = { file, diagnostics: [] }
   let program: Program | undefined
   let fileErrors: unknown[] | undefined
@@ -445,7 +464,7 @@ export function parseScreen(source: string, file: string): ParsedScreen {
         ctx,
         statement,
         'import-not-allowed',
-        'Imports and exports are not allowed; a screen file contains exactly one Screen element.',
+        `Imports and exports are not allowed; a ${documentName} file contains exactly one ${elementName} element.`,
       )
       continue
     }
@@ -454,7 +473,7 @@ export function parseScreen(source: string, file: string): ParsedScreen {
       ctx,
       statement,
       'statement-not-allowed',
-      'Only a single Screen element is allowed in a screen file; JavaScript statements are rejected.',
+      `Only a single ${elementName} element is allowed in a ${documentName} file; JavaScript statements are rejected.`,
     )
   }
   if (program.directives.length > 0) {
@@ -462,29 +481,46 @@ export function parseScreen(source: string, file: string): ParsedScreen {
       ctx,
       program.directives[0] as unknown as Node,
       'statement-not-allowed',
-      'Directives are not allowed in a screen file.',
+      `Directives are not allowed in a ${documentName} file.`,
     )
   }
   if (roots.length === 0) {
     if (ctx.diagnostics.length === 0) {
-      report(ctx, program, 'missing-screen', 'A screen file must contain exactly one Screen root element.')
+      report(
+        ctx,
+        program,
+        'missing-' + documentName,
+        `A ${documentName} file must contain exactly one ${elementName} root element.`,
+      )
     }
     return { file, diagnostics: ctx.diagnostics }
   }
   if (roots.length > 1) {
     for (const extra of roots.slice(1)) {
-      report(ctx, extra, 'multiple-screens', 'A screen file must contain exactly one Screen root element.')
+      report(
+        ctx,
+        extra,
+        'multiple-' + documentName + 's',
+        `A ${documentName} file must contain exactly one ${elementName} root element.`,
+      )
     }
   }
   const rootNode = parseElement(ctx, roots[0] as JSXElement, { path: [], label: '#' })
   if (rootNode === undefined) return { file, diagnostics: ctx.diagnostics }
+  if (layout) {
+    if (rootNode.type !== 'Layout') {
+      report(ctx, roots[0], 'missing-layout', 'A layout file requires a <Layout> root.')
+      return { file, diagnostics: ctx.diagnostics }
+    }
+    return { file, document: rootNode, diagnostics: ctx.diagnostics }
+  }
   if (rootNode.type === 'Variants') {
     // A whole-screen variant group wraps one Screen per branch. Its structure
     // is validated by the variant resolver before any kit rendering.
     return { file, document: rootNode, diagnostics: ctx.diagnostics }
   }
   if (rootNode.type !== 'Screen') {
-    report(ctx, roots[0], 'missing-screen', `The root element must be <Screen>, not <${rootNode.type}>.`)
+    report(ctx, roots[0], 'missing-' + documentName, `The root element must be <Screen>, not <${rootNode.type}>.`)
     return { file, diagnostics: ctx.diagnostics }
   }
   const root: DesignScreenNode = { ...rootNode, type: 'Screen', id: rootNode.id ?? '' }
@@ -494,4 +530,12 @@ export function parseScreen(source: string, file: string): ParsedScreen {
     document: root,
     diagnostics: ctx.diagnostics,
   }
+}
+
+export function parseScreen(source: string, file: string): ParsedScreen {
+  return parseDocument(source, file, false)
+}
+
+export function parseLayout(source: string, file: string): ParsedScreen {
+  return parseDocument(source, file, true)
 }

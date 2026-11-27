@@ -68,7 +68,14 @@ export interface WireScreen {
   readonly variantStale?: boolean
 }
 
-/** Project payload returned by `_/project`. */
+export interface WireTheme {
+  readonly tokens: Readonly<Record<string, ResolvedToken>>
+  readonly cssVariables: Readonly<Record<string, string>>
+  readonly colorScheme?: 'light' | 'dark'
+  readonly stale?: boolean
+}
+
+/** Project payload returned by the project endpoint. */
 export interface ProjectPayload {
   readonly session: string
   readonly revision: number
@@ -90,6 +97,10 @@ export interface ProjectPayload {
   readonly assets?: Readonly<Record<string, string>>
   /** Explicit selection failure, for example an unknown group or branch. */
   readonly variantError?: string
+  readonly themes?: Readonly<Record<string, WireTheme>>
+  readonly theme?: string
+  readonly declaredThemes?: readonly string[]
+  readonly initialState?: { readonly screen: string; readonly seed: NamedState }
 }
 
 /** Events payload from the SSE stream. */

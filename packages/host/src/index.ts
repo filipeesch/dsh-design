@@ -3,6 +3,7 @@ import { join, resolve } from 'node:path'
 import { normalizeFolderName } from '@filipeesch/dsh-design-core'
 import { KIT_VERSION, kitMetadata } from '@filipeesch/dsh-design-kit/meta'
 import { BrowserSessions } from './browser.ts'
+import { runningDesignBuild } from './build-identity.ts'
 import { CommentStore, type CommentPromptPort } from './comments.ts'
 import { ProjectRegistry } from './registry.ts'
 import { createRouteHandler, defaultAssetsDir } from './routes.ts'
@@ -35,6 +36,7 @@ export interface DesignConfig {
  * design folder. It is provided as `ctx.design` for the preset-scoped tools.
  */
 export class DesignService {
+  readonly build = runningDesignBuild
   /** Shared project registry, absent when the webServer extension point is missing. */
   readonly registry: ProjectRegistry | undefined
   /** Configured design folder name (one safe path segment). */

@@ -1,0 +1,12 @@
+<Screen id="history" title="History" layout="console-shell" maxWidth="spacing.content">
+  <Stack id="history-card" gap="spacing.md" styleClass="release-card">
+    <Text id="history-heading" variant="heading">Release history</Text>
+    <Callout title="Preview only" tone="info">
+      <Text>No releases were sent to a real service.</Text>
+    </Callout>
+    <List id="release-history">
+      <ListItem>Aurora 2.3 · Archived preview</ListItem>
+      <ListItem>Aurora 2.2 · Archived preview</ListItem>
+    </List>
+  </Stack>
+</Screen>

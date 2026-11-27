@@ -43,7 +43,9 @@ export interface ReviewOverlayProps {
   readonly state?: string
   /** Effective variant identity, for example `layout:spacious`. */
   readonly variant?: string
-  readonly overlays: readonly string[]
+  readonly theme?: string
+  readonly overlays?: readonly string[]
+  readonly disclosures?: Readonly<Record<string, boolean>>
   readonly tabs: Readonly<Record<string, string>>
   readonly frame: HTMLDivElement | null
   /** Content fingerprint of the rendered screen tree. */
@@ -377,7 +379,9 @@ function contextOf(props: ReviewOverlayProps): CommentContext {
     breakpoint: props.breakpoint,
     ...(props.state === undefined ? {} : { state: props.state }),
     ...(props.variant === undefined ? {} : { variant: props.variant }),
-    overlays: [...props.overlays].sort((left, right) => left.localeCompare(right)),
+    ...(props.theme === undefined ? {} : { theme: props.theme }),
+    ...(props.overlays === undefined ? {} : { overlays: [...props.overlays].sort() }),
+    ...(props.disclosures === undefined ? {} : { disclosures: { ...props.disclosures } }),
     tabs,
   }
 }
@@ -386,7 +390,14 @@ function contextSummary(context: CommentContext): string {
   const parts = [context.screen, context.breakpoint]
   if (context.state !== undefined) parts.push('state ' + context.state)
   if (context.variant !== undefined) parts.push('variant ' + context.variant)
-  if (context.overlays.length > 0) parts.push('overlays ' + context.overlays.join(', '))
+  if (context.theme !== undefined) parts.push('theme ' + context.theme)
+  if (context.overlays !== undefined && (context.overlays.length > 0 || context.theme !== undefined))
+    parts.push('overlays ' + (context.overlays.join(', ') || 'none'))
+  const disclosures = Object.entries(context.disclosures ?? {})
+  if (disclosures.length > 0)
+    parts.push(
+      'disclosures ' + disclosures.map(([id, expanded]) => id + '=' + (expanded ? 'open' : 'closed')).join(', '),
+    )
   const tabs = Object.entries(context.tabs)
   if (tabs.length > 0) parts.push('tabs ' + tabs.map(([key, value]) => key + '=' + value).join(', '))
   return parts.join(' · ')
@@ -676,7 +687,7 @@ export function ReviewOverlay(props: ReviewOverlayProps): ReactNode {
         kind: 'new',
         text: '',
         anchor: target.anchor,
-        context: { ...selected, overlays: [...selected.overlays], tabs: { ...selected.tabs } },
+        context: selected,
       })
       setStatus(undefined)
     },
@@ -701,7 +712,7 @@ export function ReviewOverlay(props: ReviewOverlayProps): ReactNode {
         text: draft.text,
         id: draft.id,
         revision: draft.revision,
-        context: { ...draft.context, overlays: [...draft.context.overlays], tabs: { ...draft.context.tabs } },
+        context: draft.context,
         ...(element === undefined ? {} : { anchor: draft.anchor }),
       })
       setStatus(undefined)

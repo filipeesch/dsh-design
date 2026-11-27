@@ -6,18 +6,22 @@
  * Loading never writes: derived output belongs to the host under
  * `<design-folder>/.cache/`.
  */
-import { readFile, readdir, stat } from 'node:fs/promises'
+import { lstat } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
-import { checkKitVersion, parseConfig } from './config.ts'
+import { checkKitVersion, SOURCE_NAME } from './config.ts'
 import { countDiagnostics, sortDiagnostics } from './diagnostics.ts'
-import { expandScreen, loadFixtures } from './fixtures.ts'
+import { expandScreen, parseFixtureCollection } from './fixtures.ts'
 import { parseJourney, validateJourney } from './journey.ts'
 import type { KitMetadata } from './metadata.ts'
 import { parseScreen } from './parse.ts'
-import { loadPreviewMetadata } from './preview.ts'
+import { parsePreviewMetadata, PREVIEW_METADATA_FILE } from './preview.ts'
+import { loadThemes } from './themes.ts'
+import { composeLayout, loadLayouts, type LayoutCatalog } from './layouts.ts'
+import { applyStyleClasses, loadStylesheets, type StylesheetCatalog } from './stylesheets.ts'
+import { localProjectSourceReader, readProjectSources, type SourceInventory } from './sources.ts'
+import { isFixtureRef } from './refs.ts'
 import { extractNamedStates } from './state.ts'
 import { validateTree, type ValidationContext } from './validate.ts'
-import { parseTokens } from './tokens.ts'
 import {
   collectVariantGroups,
   enumerateVariantSelections,
@@ -29,6 +33,8 @@ import {
 import type {
   DesignElement,
   DesignProject,
+  DesignPropValue,
+  FixtureCollection,
   DesignScreenNode,
   Diagnostic,
   NamedState,
@@ -71,8 +77,8 @@ export async function discoverProject(cwd: string, folderName = DEFAULT_DESIGN_F
   const folder = resolve(cwd, safeName)
   const configPath = join(folder, 'design.json')
   try {
-    const info = await stat(configPath)
-    return { found: info.isFile(), cwd, folderName: safeName, folder, configPath }
+    const info = await lstat(configPath)
+    return { found: info.isFile() || info.isSymbolicLink(), cwd, folderName: safeName, folder, configPath }
   } catch {
     return { found: false, cwd, folderName: safeName, folder, configPath }
   }
@@ -80,7 +86,8 @@ export async function discoverProject(cwd: string, folderName = DEFAULT_DESIGN_F
 
 /** Cached parse of one screen file, keyed by modification time and size. */
 export interface ParseCacheEntry {
-  readonly mtimeMs: number
+  readonly fingerprint: string
+  readonly mtimeMs?: number
   readonly size: number
   readonly parsed: ParsedScreen
 }
@@ -96,44 +103,27 @@ export interface LoadProjectOptions {
   readonly parseCache?: Map<string, ParseCacheEntry>
 }
 
-/** Read a project file, returning undefined when absent. */
-async function readOptional(path: string): Promise<string | undefined> {
-  try {
-    return await readFile(path, 'utf8')
-  } catch {
-    return undefined
-  }
-}
-
-/** List files in one project subdirectory, sorted for deterministic output. */
-async function listProjectFiles(folder: string, directory: string, extension: string): Promise<string[]> {
-  try {
-    const entries = await readdir(join(folder, directory), { withFileTypes: true })
-    return entries
-      .filter((entry) => entry.isFile() && entry.name.endsWith(extension))
-      .map((entry) => directory + '/' + entry.name)
-      .sort((left, right) => left.localeCompare(right))
-  } catch {
-    return []
-  }
-}
-
-/** List screen files in a design folder, sorted for deterministic output. */
+/** List design screen files admitted by the project source policy. */
 export async function listScreenFiles(folder: string): Promise<string[]> {
-  return listProjectFiles(folder, 'screens', '.dsx')
+  return [...(await readProjectSources(localProjectSourceReader(folder))).directories.screens]
 }
 
-/** List journey files in a design folder, sorted for deterministic output. */
+/** List design journey files admitted by the project source policy. */
 export async function listJourneyFiles(folder: string): Promise<string[]> {
-  return listProjectFiles(folder, 'journeys', '.dsx')
+  return [...(await readProjectSources(localProjectSourceReader(folder))).directories.journeys]
 }
 
 /** Build an empty project for a missing or broken config. */
-function emptyProject(folder: string, diagnostics: Diagnostic[]): DesignProject {
+function emptyProject(folder: string, diagnostics: Diagnostic[], sourceIdentity: string): DesignProject {
   return {
     folder,
     config: { kitVersion: '', breakpoints: [] },
     tokens: { tokens: {}, cssText: '', diagnostics: [] },
+    themes: {},
+    defaultTheme: 'base',
+    lastValidThemes: {},
+    sourceIdentity,
+    sourceFiles: [],
     screens: [],
     diagnostics: sortDiagnostics(diagnostics),
     entry: undefined,
@@ -154,8 +144,59 @@ interface PreparedScreen {
   readonly structural: boolean
 }
 
+interface SharedSources {
+  readonly layouts: LayoutCatalog
+  readonly styles: StylesheetCatalog
+  readonly fixtures: DesignProject['fixtures']
+}
+
+/** All chosen and branch projections use the same compose/expand/validate inputs. */
+function prepareProjection(screen: DesignScreenNode, file: string, kit: KitMetadata, sources: SharedSources) {
+  const composed = composeLayout(screen, sources.layouts)
+  const expanded = expandScreen(composed.root, sources.fixtures, file)
+  const states = extractNamedStates(expanded.root, file, kit)
+  const styled = applyStyleClasses(states.root, sources.styles)
+  return {
+    root: styled.root,
+    states: states.states,
+    diagnostics: [...composed.diagnostics, ...expanded.diagnostics, ...styled.diagnostics],
+    stateDiagnostics: states.diagnostics,
+  }
+}
+
+function screenDependencies(
+  document: DesignElement | undefined,
+  layouts: LayoutCatalog,
+  stylesheets: readonly string[],
+): string[] {
+  const result = new Set<string>()
+  function valueRefs(value: DesignPropValue): void {
+    if (isFixtureRef(value) && SOURCE_NAME.test(value.$fixture)) {
+      result.add('fixtures/' + value.$fixture + '.json')
+    } else if (value !== null && typeof value === 'object') {
+      for (const child of Object.values(value) as DesignPropValue[]) valueRefs(child)
+    }
+  }
+  function visit(node: DesignElement): void {
+    if (node.type === 'Screen' && typeof node.props.layout === 'string' && SOURCE_NAME.test(node.props.layout)) {
+      const file = 'layouts/' + node.props.layout + '.dsx'
+      const layout = layouts.get(node.props.layout)?.root
+      if (!result.has(file) && layout !== undefined) {
+        result.add(file)
+        visit(layout)
+      }
+      result.add(file)
+    }
+    if (Object.hasOwn(node.props, 'styleClass')) for (const file of stylesheets) result.add(file)
+    for (const value of Object.values(node.props)) valueRefs(value)
+    for (const child of node.children) if (child.kind === 'element') visit(child)
+  }
+  if (document !== undefined) visit(document)
+  return [...result].sort()
+}
+
 /** Resolve the chosen projection, expand fixtures, and extract named states. */
-function prepareScreen(parsed: ParsedScreen, fixtures: DesignProject['fixtures'], kit: KitMetadata): PreparedScreen {
+function prepareScreen(parsed: ParsedScreen, sources: SharedSources, kit: KitMetadata): PreparedScreen {
   const document = parsed.document ?? parsed.root
   if (document === undefined) {
     return { parsed, states: [], selection: {}, diagnostics: parsed.diagnostics, structural: false }
@@ -173,15 +214,14 @@ function prepareScreen(parsed: ParsedScreen, fixtures: DesignProject['fixtures']
       structural: false,
     }
   }
-  const expanded = expandScreen(chosen.screen, fixtures, parsed.file)
-  const states = extractNamedStates(expanded.root, parsed.file, kit)
+  const projection = prepareProjection(chosen.screen, parsed.file, kit, sources)
   return {
     parsed,
     document,
-    root: states.root,
-    states: states.states,
+    root: projection.root,
+    states: projection.states,
     selection: chosen.selection,
-    diagnostics: [...diagnostics, ...expanded.diagnostics, ...states.diagnostics],
+    diagnostics: [...diagnostics, ...projection.diagnostics, ...projection.stateDiagnostics],
     structural: true,
   }
 }
@@ -245,9 +285,10 @@ function validateVariantProjections(input: {
   readonly document: DesignScreenNode | DesignElement
   readonly file: string
   readonly context: ValidationContext
-  readonly fixtures: DesignProject['fixtures']
+  readonly sources: SharedSources
   readonly chosenSelection: Readonly<Record<string, string>>
   readonly chosenErrors: number
+  readonly chosenDiagnostics: readonly Diagnostic[]
   readonly chosenRoot?: DesignScreenNode
   readonly chosenStates: readonly NamedState[]
   readonly wholeScreen: boolean
@@ -272,7 +313,8 @@ function validateVariantProjections(input: {
             root: input.chosenRoot,
             states: input.chosenStates,
             selection: input.chosenSelection,
-            fixtures: input.fixtures,
+            fixtures: input.sources.fixtures,
+            diagnostics: input.chosenDiagnostics,
           }
         }
         branches.push({
@@ -295,20 +337,19 @@ function validateVariantProjections(input: {
       let snapshotStates: readonly NamedState[] = input.chosenStates
       let expandedRoot: DesignScreenNode | undefined
       if (projection.screen !== undefined) {
-        const expanded = expandScreen(projection.screen, input.fixtures, input.file)
-        const states = extractNamedStates(expanded.root, input.file, input.context.kit)
-        const semantic = validateTree(states.root, input.file, input.context)
+        const prepared = prepareProjection(projection.screen, input.file, input.context.kit, input.sources)
+        const semantic = validateTree(prepared.root, input.file, input.context)
         // Shared Screen states are validated against the chosen projection; a
         // missing branch-local target is diagnosed at selection time. A
         // whole-screen branch owns its Screen states and is validated here.
         diagnostics = [
           ...projection.diagnostics,
-          ...expanded.diagnostics,
-          ...(input.wholeScreen ? states.diagnostics : []),
+          ...prepared.diagnostics,
+          ...(input.wholeScreen ? prepared.stateDiagnostics : []),
           ...semantic,
         ]
-        expandedRoot = states.root
-        snapshotStates = input.wholeScreen ? states.states : input.chosenStates
+        expandedRoot = prepared.root
+        snapshotStates = input.wholeScreen ? prepared.states : input.chosenStates
       }
       const prefix = 'Variant group #' + group.id + ' branch "' + branch.id + '": '
       const tagged = dedupe(diagnostics.map((entry) => tagDiagnostic(entry, group, branch.id, prefix)))
@@ -319,7 +360,8 @@ function validateVariantProjections(input: {
           root: expandedRoot,
           states: snapshotStates,
           selection: projection.selection,
-          fixtures: input.fixtures,
+          fixtures: input.sources.fixtures,
+          diagnostics,
         }
       }
       branches.push({
@@ -373,13 +415,12 @@ function validateVariantProjections(input: {
       projection.screen === undefined
         ? [...projection.diagnostics]
         : (() => {
-            const expanded = expandScreen(projection.screen, input.fixtures, input.file)
-            const states = extractNamedStates(expanded.root, input.file, input.context.kit)
-            const semantic = validateTree(states.root, input.file, input.context)
+            const prepared = prepareProjection(projection.screen, input.file, input.context.kit, input.sources)
+            const semantic = validateTree(prepared.root, input.file, input.context)
             return [
               ...projection.diagnostics,
-              ...expanded.diagnostics,
-              ...(input.wholeScreen ? states.diagnostics : []),
+              ...prepared.diagnostics,
+              ...(input.wholeScreen ? prepared.stateDiagnostics : []),
               ...semantic,
             ]
           })()
@@ -418,67 +459,77 @@ function journeyDuplicates(journeys: readonly ParsedJourney[]): Diagnostic[] {
  * @param options - folder, kit metadata, installed kit version, and previous project.
  */
 export async function loadProject(options: LoadProjectOptions): Promise<DesignProject> {
+  if (!isAbsolute(options.folder)) throw new Error('design folder must be absolute, got ' + options.folder)
+  const inventory = await readProjectSources(localProjectSourceReader(options.folder))
+  return projectFromSources(options, inventory)
+}
+
+/** Resolve a previously captured inventory, with no additional project-source reads. */
+export function projectFromSources(options: LoadProjectOptions, inventory: SourceInventory): DesignProject {
   const { folder, kit, installedKitVersion, previous } = options
-  if (!isAbsolute(folder)) throw new Error(`design folder must be absolute, got "${folder}"`)
-  const configSource = await readOptional(join(folder, 'design.json'))
-  if (configSource === undefined) {
-    return emptyProject(folder, [
-      {
-        severity: 'error',
-        code: 'project-missing',
-        file: 'design.json',
-        line: 1,
-        column: 1,
-        message: `No design project exists at ${folder}; run design_init to scaffold one.`,
-      },
-    ])
+  const configEntry = inventory.entries.get('design.json')
+  if (configEntry?.source === undefined) {
+    return emptyProject(
+      folder,
+      [
+        configEntry?.issue ?? {
+          severity: 'error',
+          code: 'project-missing',
+          file: 'design.json',
+          line: 1,
+          column: 1,
+          message: 'No design project exists at ' + folder + '; run design_init to scaffold one.',
+        },
+      ],
+      inventory.sourceIdentity,
+    )
   }
-  const parsedConfig = parseConfig(configSource, 'design.json')
-  const diagnostics: Diagnostic[] = [...parsedConfig.diagnostics]
+  const parsedConfig = inventory.config
+  const diagnostics: Diagnostic[] = [...parsedConfig.diagnostics, ...inventory.diagnostics]
   if (parsedConfig.config.kitVersion !== '') {
     const mismatch = checkKitVersion(parsedConfig.config.kitVersion, installedKitVersion, 'design.json')
     if (mismatch !== undefined) diagnostics.push(mismatch)
   }
-
-  const tokensSource = await readOptional(join(folder, 'tokens.json'))
-  const tokens =
-    tokensSource === undefined
-      ? {
-          tokens: {},
-          cssText: '',
-          diagnostics: [
-            {
-              severity: 'error' as const,
-              code: 'tokens-missing',
-              file: 'tokens.json',
-              line: 1,
-              column: 1,
-              message: 'No tokens.json exists in the design folder; run design_init or restore the file.',
-            },
-          ],
-        }
-      : parseTokens(tokensSource, 'tokens.json')
-  diagnostics.push(...tokens.diagnostics)
-
-  const loadedFixtures = await loadFixtures(folder)
-  diagnostics.push(...loadedFixtures.diagnostics)
-
-  const files = await listScreenFiles(folder)
-  const parsedScreens = await Promise.all(
-    files.map(async (file) => {
-      const absolute = join(folder, file)
-      const info = await stat(absolute).catch(() => undefined)
-      const cached = options.parseCache?.get(file)
-      if (info !== undefined && cached !== undefined && cached.mtimeMs === info.mtimeMs && cached.size === info.size) {
-        return cached.parsed
-      }
-      const source = await readOptional(absolute)
-      const parsed = source === undefined ? { file, diagnostics: [], root: undefined } : parseScreen(source, file)
-      if (info !== undefined) options.parseCache?.set(file, { mtimeMs: info.mtimeMs, size: info.size, parsed })
-      return parsed
-    }),
-  )
-  const prepared = parsedScreens.map((parsed) => prepareScreen(parsed, loadedFixtures.collections, kit))
+  const palettes = loadThemes(inventory, previous)
+  const { tokens, themes, defaultTheme, lastValidThemes } = palettes
+  const { layouts, diagnostics: layoutDiagnostics } = loadLayouts(inventory)
+  const styles = loadStylesheets(inventory, tokens)
+  diagnostics.push(...palettes.diagnostics, ...layoutDiagnostics, ...styles.diagnostics)
+  const fixtures: Record<string, FixtureCollection> = {}
+  for (const file of inventory.directories.fixtures) {
+    const source = inventory.entries.get(file)?.source
+    if (source === undefined) continue
+    const id = file.slice('fixtures/'.length, -'.json'.length)
+    if (!SOURCE_NAME.test(id)) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'fixture-name',
+        file,
+        line: 1,
+        column: 1,
+        message: 'Fixture filenames must be kebab-case IDs plus .json.',
+      })
+      continue
+    }
+    const collection = parseFixtureCollection(id, file, source, diagnostics)
+    if (collection !== undefined) fixtures[id] = collection
+  }
+  const sources: SharedSources = { layouts, styles, fixtures }
+  const parsedScreens = inventory.directories.screens.map((file): ParsedScreen => {
+    const entry = inventory.entries.get(file)
+    if (entry?.source === undefined) return { file, diagnostics: entry?.issue === undefined ? [] : [entry.issue] }
+    const cached = options.parseCache?.get(file)
+    if (cached?.fingerprint === entry.fingerprint) return cached.parsed
+    const parsed = parseScreen(entry.source, file)
+    options.parseCache?.set(file, {
+      fingerprint: entry.fingerprint,
+      mtimeMs: entry.mtimeMs,
+      size: entry.size ?? 0,
+      parsed,
+    })
+    return parsed
+  })
+  const prepared = parsedScreens.map((parsed) => prepareScreen(parsed, sources, kit))
 
   // Collect screen ids first so cross-screen references validate in one pass.
   const previousByFile = new Map((previous?.screens ?? []).map((screen) => [screen.file, screen]))
@@ -518,10 +569,14 @@ export async function loadProject(options: LoadProjectOptions): Promise<DesignPr
   for (const candidate of prepared) {
     const parsed = candidate.parsed
     const previousScreen = previousByFile.get(parsed.file)
+    const sourceDependencies = screenDependencies(candidate.document, layouts, parsedConfig.config.stylesheets ?? [])
+    const defaultPaletteFile = parsedConfig.config.themes?.[defaultTheme]
+    if (defaultPaletteFile !== undefined) sourceDependencies.push(defaultPaletteFile)
     if (candidate.root === undefined) {
       screenResults.push({
         id: previousScreen?.id ?? '',
         file: parsed.file,
+        sourceDependencies,
         diagnostics: sortDiagnostics(candidate.diagnostics),
         ...(previousScreen?.lastValidRoot === undefined ? {} : { lastValidRoot: previousScreen.lastValidRoot }),
         states: previousScreen?.states ?? [],
@@ -563,9 +618,10 @@ export async function loadProject(options: LoadProjectOptions): Promise<DesignPr
             document: candidate.document,
             file: parsed.file,
             context,
-            fixtures: loadedFixtures.collections,
+            sources,
             chosenSelection,
             chosenErrors: countDiagnostics([...candidate.diagnostics, ...semantic]).errors,
+            chosenDiagnostics: [...candidate.diagnostics, ...semantic],
             ...(candidate.root === undefined ? {} : { chosenRoot: candidate.root }),
             chosenStates: candidate.states,
             wholeScreen: candidate.document?.type === 'Variants',
@@ -611,6 +667,7 @@ export async function loadProject(options: LoadProjectOptions): Promise<DesignPr
     screenResults.push({
       id: candidate.root.id === '' ? (previousScreen?.id ?? '') : candidate.root.id,
       file: parsed.file,
+      sourceDependencies,
       root: candidate.root,
       diagnostics: all,
       ...(hasBlocking
@@ -625,7 +682,7 @@ export async function loadProject(options: LoadProjectOptions): Promise<DesignPr
           ? {}
           : { variantDocument: previousScreen.variantDocument }),
       ...(documentValid && candidate.document !== undefined
-        ? { variantFixtures: loadedFixtures.collections }
+        ? { variantFixtures: fixtures }
         : previousScreen?.variantFixtures === undefined
           ? {}
           : { variantFixtures: previousScreen.variantFixtures }),
@@ -647,10 +704,10 @@ export async function loadProject(options: LoadProjectOptions): Promise<DesignPr
   }
 
   // Journeys validate against the prepared screens and their named states.
-  const journeyFiles = await listJourneyFiles(folder)
+  const journeyFiles = inventory.directories.journeys
   const parsedJourneys: ParsedJourney[] = []
   for (const file of journeyFiles) {
-    const source = await readOptional(join(folder, file))
+    const source = inventory.entries.get(file)?.source
     if (source !== undefined) parsedJourneys.push(parseJourney(source, file))
   }
   const journeyDiagnostics = journeyDuplicates(parsedJourneys)
@@ -664,6 +721,7 @@ export async function loadProject(options: LoadProjectOptions): Promise<DesignPr
         return found?.root ?? found?.lastValidRoot
       },
       statesOf: (screen) => screensById.get(screen)?.states ?? [],
+      themes: Object.keys(themes),
     })
     return {
       file: parsed.file,
@@ -673,17 +731,21 @@ export async function loadProject(options: LoadProjectOptions): Promise<DesignPr
     }
   })
 
-  const metadata = await loadPreviewMetadata(folder, screenResults)
+  const previewSource = inventory.entries.get(PREVIEW_METADATA_FILE)?.source
+  const metadata =
+    previewSource === undefined ? { diagnostics: [] } : parsePreviewMetadata(previewSource, screenResults)
   const perScreen = screenResults.flatMap((screen) => screen.diagnostics)
   const perJourney = journeys.flatMap((journey) => journey.diagnostics)
-  const allDiagnostics = sortDiagnostics([
-    ...configTokenDiagnostics,
-    ...screenDiagnostics,
-    ...journeyDiagnostics,
-    ...metadata.diagnostics,
-    ...perScreen,
-    ...perJourney,
-  ])
+  const allDiagnostics = sortDiagnostics(
+    dedupe([
+      ...configTokenDiagnostics,
+      ...screenDiagnostics,
+      ...journeyDiagnostics,
+      ...metadata.diagnostics,
+      ...perScreen,
+      ...perJourney,
+    ]),
+  )
   const entry = parsedConfig.config.entry ?? screenIds[0]
   if (entry !== undefined && !screenIds.includes(entry)) {
     allDiagnostics.push({
@@ -700,10 +762,17 @@ export async function loadProject(options: LoadProjectOptions): Promise<DesignPr
     folder,
     config: parsedConfig.config,
     tokens,
+    themes,
+    defaultTheme,
+    lastValidThemes,
+    sourceIdentity: inventory.sourceIdentity,
+    sourceFiles: [...inventory.entries]
+      .filter(([file, entry]) => file.includes('.') && entry.fingerprint !== 'missing')
+      .map(([file]) => file),
     screens: screenResults,
     diagnostics: kitMismatch === undefined ? sortDiagnostics(allDiagnostics) : allDiagnostics,
     entry,
-    fixtures: loadedFixtures.collections,
+    fixtures,
     journeys,
     ...(metadata.preview === undefined ? {} : { preview: metadata.preview }),
   }

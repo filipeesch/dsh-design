@@ -28,7 +28,7 @@ The preset SHALL add a system prompt section that teaches the DSL essentials (sy
 - **THEN** it is under 6,000 characters and contains no per-component prop tables
 
 ### Requirement: Working loop guidance
-The guidance SHALL instruct the agent to check `design_status` first, scaffold with `design_init` when needed, edit design files directly with the standard tools, fix the diagnostics attached to its edits before continuing, inspect results with `design_view`, and share the preview URL with the user after meaningful changes. The guidance SHALL point to batched catalog lookups and composition recipes. It SHALL prefer built-in semantic controls, prepare the important interactive path when it is clear, and ask only when ambiguity would materially change the experience. It SHALL distinguish durable project context from session review comments.
+The guidance SHALL instruct the agent to check `design_status` first, scaffold with `design_init` when needed, edit design files directly with the standard tools, fix the diagnostics attached to its edits before continuing, inspect results with `design_view`, and share the preview URL with the user after meaningful changes. The guidance SHALL point to batched catalog lookups and composition recipes. It SHALL prefer built-in semantic controls, prepare the important interactive path when it is clear, and ask only when ambiguity would materially change the experience. It SHALL distinguish durable project context from session review comments. It SHALL direct agents to search the catalog by intent when a canonical name is unknown and discover local recipes and shared layouts without copying shared source.
 
 #### Scenario: First turn in a repository without a design
 - **WHEN** the user asks a `design` session to sketch a screen in a repository without a design project
@@ -46,7 +46,7 @@ The preset SHALL NOT add file write restrictions beyond the session's normal fil
 - **THEN** the write is governed only by the session's normal file policy
 
 ### Requirement: Headless check guidance
-The preset SHALL teach that fixtures must be fictitious, provide a compact path to named states and journey syntax, recommend running relevant journeys and layout lint when applicable, and recommend screenshots only when visual evidence is needed. These recommendations SHALL NOT become an enforced checklist or extra write restriction. The guidance SHALL recommend a representative visual check early in UI reconstruction before repeating layout patterns. It SHALL distinguish valid source, measured geometry, and visual fidelity and explain the fallback when browser or inline image delivery is unavailable.
+The preset SHALL teach that fixtures must be fictitious, provide a compact path to named states and journey syntax, recommend running relevant journeys and layout lint when applicable, and recommend screenshots only when visual evidence is needed. These recommendations SHALL NOT become an enforced checklist or extra write restriction. The guidance SHALL recommend a representative visual check early in UI reconstruction before repeating layout patterns. It SHALL recommend focused measurements or comparisons for geometry and distinguish valid source, measured geometry, and visual fidelity and explain the fallback when browser or inline image delivery is unavailable.
 
 #### Scenario: Design check guidance
 - **WHEN** the design agent receives the preset instructions
@@ -57,7 +57,7 @@ The preset SHALL teach that fixtures must be fictitious, provide a compact path 
 - **THEN** the guidance calls for visual inspection rather than treating clean validation or lint as evidence of fidelity
 
 ### Requirement: Address review comments in the conversation
-The preset SHALL teach the design agent to locate each submitted comment using its screen, breakpoint, interaction context, and node identity; apply the requested changes to the design text; and reply in chat with what changed or what could not be located. It SHALL explain that structural addresses may be stale. It SHALL NOT imply that comment drafts are versioned or available to a tool before submission.
+The preset SHALL teach the design agent to locate each submitted comment using its screen, breakpoint, theme, interaction context, and node identity; apply the requested changes to the design text; and reply in chat with what changed or what could not be located. It SHALL explain that structural addresses may be stale. It SHALL NOT imply that comment drafts are versioned or available to a tool before submission.
 
 #### Scenario: A batch contains a stale address
 - **WHEN** the agent receives a batch containing a comment with an unresolved structural address
@@ -70,9 +70,9 @@ The preset SHALL show the agent how to author alternatives in the DSL, share and
 - **WHEN** the agent is asked to try a new alternative
 - **THEN** the guidance tells it to keep the current choice while preparing the comparison and wait for an explicit selection before promotion
 
-### Requirement: Implementation handoff guidance
-Design guidance SHALL explain how to generate and regenerate a chosen handoff on demand, validate the design and relevant journeys, and share the manifest path with the implementing agent. It SHALL distinguish the design contract from generated implementation code and keep generated output out of Git.
+### Requirement: Path-only design delivery guidance
+The guidance SHALL direct the agent to share existing accessible paths, the accepted selection and checks, and a source revision when relevant, without generating a delivery export or suggesting that a local cache path grants access to another workspace. The agent SHALL distinguish a session preview link from a versioned design source.
 
-#### Scenario: Share the accepted design with an implementer
-- **WHEN** the owner requests a contract for an accepted design selection
-- **THEN** the Design agent uses the handoff tool and provides the artifact paths and acceptance flows without generating application code
+#### Scenario: Deliver accepted work to an implementer
+- **WHEN** the owner asks where the approved design is
+- **THEN** guidance directs the agent to share accessible existing files or evidence and the accepted selection without packaging them again

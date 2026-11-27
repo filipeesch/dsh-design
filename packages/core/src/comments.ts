@@ -16,6 +16,8 @@ export const COMMENT_BATCH_MAX = 50
 export const COMMENT_OVERLAYS_MAX = 20
 /** Maximum tab selections captured in one comment context. */
 export const COMMENT_TABS_MAX = 50
+/** Maximum authored Disclosure coordinates captured in one comment. */
+export const COMMENT_DISCLOSURES_MAX = 50
 /** Maximum accepted submission receipts retained for one session. */
 export const COMMENT_RECEIPTS_MAX = 50
 /** Maximum JSON body bytes accepted by a comment mutation. */
@@ -56,8 +58,12 @@ export interface CommentContext {
   readonly breakpoint: string
   /** Named screen state applied at capture, when one was active. */
   readonly state?: string
-  /** Open overlay ids, in stable order. */
-  readonly overlays: readonly string[]
+  /** Complete open overlay set, omitted when unavailable. */
+  readonly overlays?: readonly string[]
+  /** Effective palette displayed at capture. */
+  readonly theme?: string
+  /** True or false effective expansions, keyed by stable Disclosure id. */
+  readonly disclosures?: Readonly<Record<string, boolean>>
   /** Tab node id to selected tab value; never free-form field values. */
   readonly tabs: Readonly<Record<string, string>>
   /** Optional typed variant identity, when a renderer provides one. */
@@ -179,7 +185,16 @@ export function parseCommentAnchor(value: unknown): CommentValidation<CommentAnc
 /** Validate reproducible interaction context; free-form field values are rejected by shape. */
 export function parseCommentContext(value: unknown): CommentValidation<CommentContext> {
   if (!isRecord(value)) return invalid('context must be an object')
-  const extra = exactKeys(value, ['screen', 'breakpoint', 'state', 'overlays', 'tabs', 'variant'])
+  const extra = exactKeys(value, [
+    'screen',
+    'breakpoint',
+    'state',
+    'theme',
+    'overlays',
+    'tabs',
+    'disclosures',
+    'variant',
+  ])
   if (extra !== undefined) return invalid('context.' + extra + ' is not allowed')
   const screen = boundedLabel(value.screen, 'context.screen')
   if (!screen.ok) return screen
@@ -209,7 +224,32 @@ export function parseCommentContext(value: unknown): CommentValidation<CommentCo
     if (hasControlCharacter(entry)) return invalid('context.tabs values must not contain control characters')
     tabs[key] = entry
   }
-  const variant = value.variant === undefined ? undefined : boundedLabel(value.variant, 'context.variant')
+  const theme = value.theme === undefined ? undefined : boundedLabel(value.theme, 'context.theme')
+  if (theme !== undefined && (!theme.ok || !STABLE_ID_PATTERN.test(theme.value)))
+    return invalid('context.theme must be a valid palette name')
+  const expanded = value.disclosures
+  const disclosures: Record<string, boolean> = {}
+  if (expanded !== undefined) {
+    if (!isRecord(expanded) || Object.keys(expanded).length > COMMENT_DISCLOSURES_MAX)
+      return invalid(
+        'context.disclosures must be an object with at most ' + String(COMMENT_DISCLOSURES_MAX) + ' entries',
+      )
+    for (const [id, entry] of Object.entries(expanded)) {
+      if (!STABLE_ID_PATTERN.test(id) || typeof entry !== 'boolean')
+        return invalid('context.disclosures must map stable ids to booleans')
+      disclosures[id] = entry
+    }
+  }
+  // Canonical identities may contain multiple paths and a bounded hash suffix.
+  const rawVariant = value.variant
+  const variant =
+    rawVariant === undefined
+      ? undefined
+      : typeof rawVariant === 'string' &&
+          rawVariant.length <= COMMENT_LABEL_MAX &&
+          /^[A-Za-z0-9][A-Za-z0-9._:/ |#-]*$/.test(rawVariant)
+        ? { ok: true as const, value: rawVariant }
+        : invalid<string>('context.variant must be a valid variant identity')
   if (variant !== undefined && !variant.ok) return variant
   return {
     ok: true,
@@ -217,8 +257,10 @@ export function parseCommentContext(value: unknown): CommentValidation<CommentCo
       screen: screen.value,
       breakpoint: breakpoint.value,
       ...(state === undefined ? {} : { state: state.value }),
-      overlays,
+      ...(value.overlays === undefined ? {} : { overlays }),
+      ...(theme === undefined ? {} : { theme: theme.value }),
       tabs,
+      ...(expanded === undefined ? {} : { disclosures }),
       ...(variant === undefined ? {} : { variant: variant.value }),
     },
   }
@@ -329,12 +371,28 @@ export function formatCommentBatch(drafts: readonly CommentDraft[]): string {
       'design revision=' + String(draft.anchor.revision),
     ]
     if (draft.context.state !== undefined) details.push('named state=' + draft.context.state)
-    if (draft.context.overlays.length > 0) details.push('overlays=' + draft.context.overlays.join(','))
+    if (draft.context.theme !== undefined) details.push('theme=' + draft.context.theme)
+    if (draft.context.overlays !== undefined && draft.context.overlays.length > 0)
+      details.push('overlays=' + draft.context.overlays.join(','))
     const tabs = Object.entries(draft.context.tabs)
     if (tabs.length > 0) details.push('tabs=' + tabs.map(([key, value]) => key + '=' + value).join(','))
     if (draft.context.variant !== undefined) details.push('variant=' + draft.context.variant)
     const text = draft.text.replace(/\r\n/g, '\n').replace(/\n/g, '\n   ')
     lines.push('', String(index + 1) + '. Comment: ' + text, '   Context: ' + details.join('; '))
+    if (draft.context.theme !== undefined || draft.context.disclosures !== undefined) {
+      lines.push(
+        '   Review context: ' +
+          JSON.stringify({
+            screen: draft.context.screen,
+            ...(draft.context.theme === undefined
+              ? {}
+              : { theme: draft.context.theme, selection: draft.context.variant ?? '' }),
+            open: draft.context.overlays,
+            tabs: draft.context.tabs,
+            disclosures: draft.context.disclosures,
+          }),
+      )
+    }
   }
   return lines.join('\n')
 }

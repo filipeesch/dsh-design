@@ -1,5 +1,6 @@
 import { build } from 'esbuild'
-import { cp, mkdir, readdir, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -108,14 +109,34 @@ async function buildRenderer() {
   await cp(resolve(root, 'node_modules/@fontsource/inter/LICENSE'), resolve(dist, 'fonts/Inter-OFL.txt'))
 }
 
+async function buildIdentity(version) {
+  const hash = createHash('sha256')
+  async function add(path) {
+    const entries = await readdir(resolve(root, path), { withFileTypes: true })
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name, 'en'))) {
+      const name = path + '/' + entry.name
+      if (entry.isDirectory()) await add(name)
+      else if (entry.isFile()) hash.update(JSON.stringify(name)).update(await readFile(resolve(root, name)))
+    }
+  }
+  for (const name of ['bundle', 'client', 'core', 'host', 'kit', 'preset', 'renderer'])
+    await add('packages/' + name + '/src')
+  for (const name of ['pnpm-lock.yaml', 'scripts/build.mjs']) hash.update(await readFile(resolve(root, name)))
+  if (version !== undefined) hash.update(version)
+  return { __DSH_DESIGN_BUILD__: JSON.stringify({ id: hash.digest('hex').slice(0, 16), version }) }
+}
+
 async function buildHost() {
+  const define = await buildIdentity()
   await build({
     ...nodeShared,
+    define,
     entryPoints: [resolve(pkg('host'), 'src/index.ts')],
     outfile: resolve(pkg('host'), 'lib/index.js'),
   })
   await build({
     ...nodeShared,
+    define,
     entryPoints: [resolve(pkg('host'), 'src/tools.ts')],
     outfile: resolve(pkg('host'), 'lib/tools.js'),
   })
@@ -163,8 +184,20 @@ async function buildClientBundle(outfile, id) {
 async function buildBundle() {
   const lib = resolve(pkg('bundle'), 'lib')
   await rm(lib, { recursive: true, force: true })
-  await build({ ...nodeShared, entryPoints: [resolve(pkg('host'), 'src/index.ts')], outfile: resolve(lib, 'host.js') })
-  await build({ ...nodeShared, entryPoints: [resolve(pkg('host'), 'src/tools.ts')], outfile: resolve(lib, 'tools.js') })
+  const { version } = JSON.parse(await readFile(resolve(pkg('bundle'), 'package.json'), 'utf8'))
+  const define = await buildIdentity(version)
+  await build({
+    ...nodeShared,
+    define,
+    entryPoints: [resolve(pkg('host'), 'src/index.ts')],
+    outfile: resolve(lib, 'host.js'),
+  })
+  await build({
+    ...nodeShared,
+    define,
+    entryPoints: [resolve(pkg('host'), 'src/tools.ts')],
+    outfile: resolve(lib, 'tools.js'),
+  })
   await build({
     ...nodeShared,
     entryPoints: [resolve(pkg('preset'), 'src/index.ts')],

@@ -194,7 +194,7 @@ A passing run prints:
     branch.
 11. **Discard and cache.** `REVIEW_DISCARD_IGNORED` lists only `catalog`.
     `git check-ignore` names both rules, and neither artifact appears in
-    discovery or the handoff.
+    discovery or default inspection.
 12. **Owner fence.** Request the same preview without the owner session; the
     host refuses it before serving project content.
 13. **Promotion drill (optional).** In the disposable workspace, replace the
