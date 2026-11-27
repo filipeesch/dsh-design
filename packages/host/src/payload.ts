@@ -15,6 +15,7 @@ import {
   type ResolvedToken,
 } from '@filipeesch/dsh-design-core'
 import { kitMetadata } from '@filipeesch/dsh-design-kit/meta'
+import type { ProjectSnapshot } from './runtime.ts'
 
 /** One explicit branch projection requested by a preview URL. */
 export interface PayloadVariantRequest {
@@ -71,6 +72,8 @@ export interface PreviewPayload {
 
 /** Project endpoint only; deterministic rendering uses PreviewPayload. */
 export interface InteractivePreviewPayload extends PreviewPayload {
+  readonly token: string
+  readonly projectedScreen?: string
   readonly preview?: PreviewMetadata
   readonly relationships: readonly PreviewRelationship[]
 }
@@ -213,11 +216,18 @@ export function buildPayload(
 /** Attach project review metadata and graph evidence to the interactive endpoint. */
 export function buildInteractivePayload(
   session: string,
-  revision: number,
+  snapshot: ProjectSnapshot,
   kitVersion: string,
-  project: DesignProject,
+  requestedScreen?: string,
   variantRequest?: PayloadVariantRequest,
 ): InteractivePreviewPayload {
+  const { project, revision, token } = snapshot
+  const screens = project.screens.filter((screen) => screen.id !== '')
+  const find = (id: string | undefined) => screens.find((screen) => screen.id === id)
+  const projected =
+    variantRequest === undefined
+      ? (find(requestedScreen) ?? find(project.entry) ?? screens[0])
+      : find(variantRequest.screen)
   const relationships: PreviewRelationship[] = []
   const knownScreens = new Set<string>()
   const duplicateScreens = new Set<string>()
@@ -226,14 +236,19 @@ export function buildInteractivePayload(
     if (knownScreens.has(screen.id)) duplicateScreens.add(screen.id)
     knownScreens.add(screen.id)
   }
-  const payload = projectPayload(session, revision, kitVersion, project, undefined, variantRequest, (root) => {
-    if (duplicateScreens.has(root.id)) return
-    for (const edge of navigationRelationships(root, kitMetadata)) {
-      if (knownScreens.has(edge.to.screen) && !duplicateScreens.has(edge.to.screen)) relationships.push(edge)
-    }
+  const payload = projectPayload(session, revision, kitVersion, project, undefined, variantRequest, {
+    projected,
+    onCurrentRoot(root) {
+      if (duplicateScreens.has(root.id)) return
+      for (const edge of navigationRelationships(root, kitMetadata)) {
+        if (knownScreens.has(edge.to.screen) && !duplicateScreens.has(edge.to.screen)) relationships.push(edge)
+      }
+    },
   })
   return {
     ...payload,
+    token,
+    ...(projected === undefined ? {} : { projectedScreen: projected.id }),
     relationships: [...relationships, ...(project.preview?.relationships ?? [])],
     ...(project.preview === undefined ? {} : { preview: project.preview }),
   }
@@ -246,7 +261,10 @@ function projectPayload(
   project: DesignProject,
   assets: Record<string, string> | undefined,
   variantRequest: PayloadVariantRequest | undefined,
-  onCurrentRoot?: (root: NonNullable<ProjectScreen['root']>) => void,
+  interactive?: {
+    projected: ProjectScreen | undefined
+    onCurrentRoot: (root: NonNullable<ProjectScreen['root']>) => void
+  },
   options?: PayloadRenderOptions,
 ): PreviewPayload {
   let requestError: string | undefined
@@ -267,17 +285,30 @@ function projectPayload(
       const variant = selected.variant
       const root = requested ? (variant === undefined ? undefined : selected.root) : chosenRoot
       if (root !== undefined && screen.variantDocumentCurrent !== false && selected.stale !== true) {
-        onCurrentRoot?.(root)
+        interactive?.onCurrentRoot(root)
       }
-      return {
+      const lastValidRoot = requested ? undefined : screen.lastValidRoot
+      const summary = {
         id: screen.id,
         file: screen.file,
-        root,
-        lastValidRoot: requested ? undefined : screen.lastValidRoot,
         diagnostics: screen.diagnostics,
         errors: requested ? 0 : counts.errors,
         blockingErrors: requested ? 0 : blockingErrors,
         warnings: counts.warnings,
+      }
+      const title = (root ?? lastValidRoot)?.props.title
+      const label = interactive !== undefined && typeof title === 'string' && title.trim() !== '' ? { title } : {}
+      if (interactive !== undefined && screen !== interactive.projected) return { ...summary, ...label }
+      return {
+        id: screen.id,
+        file: screen.file,
+        root,
+        lastValidRoot,
+        diagnostics: summary.diagnostics,
+        errors: summary.errors,
+        blockingErrors: summary.blockingErrors,
+        warnings: summary.warnings,
+        ...label,
         effectiveSelection: variant?.selection ?? screen.chosenSelection,
         states: selected.states ?? screen.states,
         variants: screen.variants ?? [],
@@ -301,7 +332,7 @@ function projectPayload(
     themes[name] = toPalette(palette.tokens.tokens, palette.colorScheme)
   }
   // Retained sources are preview-only; a deterministic render must never use them.
-  if (onCurrentRoot !== undefined) {
+  if (interactive !== undefined) {
     for (const [name, palette] of Object.entries(project.lastValidThemes ?? {})) {
       themes[name] ??= { ...toPalette(palette.tokens.tokens, palette.colorScheme), stale: true }
     }
@@ -336,7 +367,7 @@ function projectPayload(
         }),
     ...(options?.initialState === undefined ? {} : { initialState: options.initialState }),
     diagnostics:
-      onCurrentRoot !== undefined
+      interactive !== undefined
         ? project.diagnostics
         : project.diagnostics.filter((entry) => entry.file !== PREVIEW_METADATA_FILE),
     screens,

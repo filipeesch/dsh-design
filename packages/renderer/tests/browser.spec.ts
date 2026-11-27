@@ -237,7 +237,6 @@ let current: ProjectPayload = payload(1, [
   screen('stated', statedSource, statedStates),
   screen('reconcile', reconcileSource(['order-1', 'order-2'])),
 ])
-const streams = new Set<import('node:http').ServerResponse>()
 
 interface BrowserDraft {
   id: string
@@ -274,8 +273,6 @@ async function readBody(req: import('node:http').IncomingMessage): Promise<unkno
 
 function publish(next: ProjectPayload): void {
   current = next
-  for (const stream of streams)
-    stream.write('event: revision\ndata: ' + JSON.stringify({ rev: next.revision }) + '\n\n')
 }
 
 const MIME: Record<string, string> = {
@@ -357,11 +354,9 @@ beforeAll(async () => {
       res.end(JSON.stringify(current))
       return
     }
-    if (apiPath === '/_/events') {
-      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' })
-      res.write('retry: 200\n\n')
-      streams.add(res)
-      req.on('close', () => streams.delete(res))
+    if (apiPath === '/_/revision') {
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      res.end(JSON.stringify({ token: String(current.revision) }))
       return
     }
     if (apiPath.startsWith('/_/assets/') || url.pathname.startsWith('/_/assets/')) {
@@ -495,10 +490,10 @@ describe('real browser preview regressions', async () => {
         expect(await page.getByText('Styled card').count()).toBe(1)
         await page.goBack()
         await page.waitForURL('**/design/session-test/')
-        expect(await page.getByText('Home screen').count()).toBe(1)
+        await page.getByText('Home screen').waitFor()
         await page.goForward()
         await page.waitForURL('**/design/session-test/checkout?bp=desktop')
-        expect(await page.getByText('Styled card').count()).toBe(1)
+        await page.getByText('Styled card').waitFor()
         await page.getByLabel('Breakpoint').selectOption('mobile')
         await page.waitForURL('**/design/session-test/checkout?bp=mobile')
         expect(await page.locator('.dsx-frame').getAttribute('data-breakpoint')).toBe('mobile')
@@ -811,7 +806,7 @@ describe('real browser preview regressions', async () => {
         await mapButton.click()
         await map.getByRole('button', { name: 'All screens' }).click()
         await map.getByRole('link', { name: 'Standalone help' }).press('Enter')
-        expect(await page.getByText('Independent topic').isVisible()).toBe(true)
+        await page.getByText('Independent topic').waitFor()
         await browseScreen(page, 'checkout')
         const outcomes = page.getByRole('region', { name: 'Simulated outcomes' })
         const simulate = outcomes.getByRole('button', { name: 'Simulate approval' })
@@ -1875,7 +1870,7 @@ describe('real browser preview regressions', async () => {
     )
 
     it.skipIf(chromiumPath === undefined)(
-      'preserves compatible pane interaction through a valid SSE refresh',
+      'preserves compatible pane interaction through a valid revision refresh',
       async () => {
         variantDemoBroken = undefined
         current = payload(61, [variantDemoScreen('compact')])

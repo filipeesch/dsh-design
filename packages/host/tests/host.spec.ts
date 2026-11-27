@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createHarness, callTool, runPipeline, writeScreen, type HostHarness } from './harness.ts'
-import { fingerprintDesignTree, scaffoldProject } from '@filipeesch/dsh-design-core'
+import { scaffoldProject } from '@filipeesch/dsh-design-core'
 import { apply as applyHost } from '../src/index.ts'
 
 const harnesses: HostHarness[] = []
@@ -70,7 +70,7 @@ describe('project registry and watcher', () => {
   })
 
   it('increments the revision and reparses changed files incrementally', async () => {
-    const h = await harness()
+    const h = await harness({ debounceMs: 5000 })
     h.registry.learnSession('one', h.root)
     const runtime = (await h.registry.forSession('one'))!
     const first = await runtime.get()
@@ -86,42 +86,47 @@ describe('project registry and watcher', () => {
     expect(first.screens[0]?.id).toBe('home')
   })
 
-  it('resets the revision after idle eviction while unchanged content keeps its fingerprint', async () => {
-    const h = await harness()
+  it('renews the watcher lease and reloads edits made during idle eviction', async () => {
+    // This test advances the idle clock, not filesystem event delivery.
+    const h = await harness({ debounceMs: 200 })
     vi.useFakeTimers()
     try {
       h.registry.learnSession('one', h.root)
+      h.registry.learnSession('two', h.root)
       const first = (await h.registry.forSession('one'))!
-      const projectA = await first.get()
-      expect(first.currentRevision).toBe(1)
-      const fingerprintA = fingerprintDesignTree(projectA.screens[0]!.root!)
-      const unsubscribe = first.subscribe(() => undefined)
-      unsubscribe()
-      await vi.advanceTimersByTimeAsync(120)
+      const snapshotA = await first.previewSnapshot()
+      expect(snapshotA.revision).toBe(1)
+      const readCurrent = vi.spyOn(first, 'readCurrent')
+      await vi.advanceTimersByTimeAsync(30)
+      const shared = (await h.registry.forSession('two'))!
+      expect(await shared.previewSnapshot()).toBe(snapshotA)
+      expect(readCurrent).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(30)
+      expect(h.registry.size).toBe(1)
+      await vi.advanceTimersByTimeAsync(30)
       expect(h.registry.size).toBe(0)
+      expect((first as unknown as { watcher?: unknown }).watcher).toBeUndefined()
+
+      await writeScreen(h.root, 'home.dsx', '<Screen id="home"><Text>Incomplete')
       const second = (await h.registry.forSession('one'))!
+      const snapshotB = await second.previewSnapshot()
       expect(second).not.toBe(first)
-      const projectB = await second.get()
-      expect(second.currentRevision).toBe(1)
-      expect(fingerprintDesignTree(projectB.screens[0]!.root!)).toBe(fingerprintA)
-      await writeScreen(h.root, 'home.dsx', '<Screen id="home"><Text>Edited after idle</Text></Screen>')
-      const projectC = await second.reload()
-      expect(second.currentRevision).toBe(2)
-      expect(fingerprintDesignTree(projectC.screens[0]!.root!)).not.toBe(fingerprintA)
+      expect(snapshotB.revision).toBe(1)
+      expect(snapshotB.token).not.toBe(snapshotA.token)
+      expect(snapshotB.project.screens[0]).toMatchObject({
+        id: 'home',
+        lastValidRoot: snapshotA.project.screens[0]?.root,
+        diagnostics: expect.arrayContaining([expect.objectContaining({ severity: 'error' })]),
+      })
+      await writeScreen(h.root, 'home.dsx', '<Screen id="home"><Text>Repaired after idle</Text></Screen>')
+      const repaired = await second.reload()
+      expect(JSON.stringify(repaired.screens[0]?.root)).toContain('Repaired after idle')
+      h.close()
+      expect((second as unknown as { watcher?: unknown }).watcher).toBeUndefined()
+      expect(vi.getTimerCount()).toBe(0)
     } finally {
       vi.useRealTimers()
     }
-  })
-
-  it('stops the watcher after the idle window', async () => {
-    const h = await harness()
-    h.registry.learnSession('one', h.root)
-    const runtime = (await h.registry.forSession('one'))!
-    await runtime.get()
-    const unsubscribe = runtime.subscribe(() => undefined)
-    unsubscribe()
-    await new Promise((resolve) => setTimeout(resolve, 120))
-    expect((runtime as unknown as { watcher?: unknown }).watcher).toBeUndefined()
   })
 })
 
@@ -148,9 +153,55 @@ describe('preview routes', () => {
     h.sessions.set('session-test', { id: 'session-test', header: { cwd: h.root } })
     const { server, base } = await listen(h.route, { principal: { kind: 'subagent' } })
     try {
-      const response = await fetch(base + '/design/session-test/')
-      expect(response.status).toBe(403)
-      expect(await response.text()).toBe('owner access required')
+      for (const endpoint of ['', '_/revision', '_/project']) {
+        const response = await fetch(base + '/design/session-test/' + endpoint)
+        expect(response.status).toBe(403)
+        expect(await response.text()).toBe('owner access required')
+      }
+      expect(h.registry.size).toBe(0)
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  it('serves finite revision responses and publishes edits observed by the shared watcher', async () => {
+    const h = await harness()
+    h.sessions.set('session-test', { id: 'session-test', header: { cwd: h.root } })
+    const { server, base } = await listen(h.route)
+    const path = base + '/design/session-test/_/'
+    const revision = async () => {
+      const response = await fetch(path + 'revision', { signal: AbortSignal.timeout(1000) })
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toContain('application/json')
+      expect(response.headers.get('cache-control')).toBe('no-store')
+      const body = (await response.json()) as { token: string }
+      expect(body).toEqual({ token: expect.any(String) })
+      expect(body.token).not.toBe('')
+      return body.token
+    }
+    try {
+      const initial = await revision()
+      const runtime = (await h.registry.forSession('session-test'))!
+      const reads = vi.spyOn(runtime, 'readCurrent')
+      expect(await revision()).toBe(initial)
+      expect(reads).not.toHaveBeenCalled()
+      const old = await fetch(path + 'events', { signal: AbortSignal.timeout(1000) })
+      expect(old.status).toBe(404)
+      await old.text()
+      await writeScreen(h.root, 'home.dsx', '<Screen id="home"><Text>Changed by watcher</Text></Screen>')
+      const next = await vi.waitFor(
+        async () => {
+          const token = await revision()
+          expect(token).not.toBe(initial)
+          return token
+        },
+        { interval: 10, timeout: 1000 },
+      )
+      expect(reads).toHaveBeenCalled()
+      const response = await fetch(path + 'project')
+      const payload = (await response.json()) as { token: string; screens: unknown[] }
+      expect(payload.token).toBe(next)
+      expect(JSON.stringify(payload.screens)).toContain('Changed by watcher')
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }
@@ -172,7 +223,10 @@ describe('preview routes', () => {
     try {
       const shell = await fetch(base + '/design/session-test/')
       expect(shell.status).toBe(200)
-      expect(await shell.text()).toContain('/design/session-test/_/assets/app.js')
+      const script = (await shell.text()).match(/src="([^"]+app\.js\?build=[^"]+)"/)?.[1]
+      expect(script).toMatch(/^\/design\/session-test\/_\/assets\/app\.js\?build=[a-z0-9-]+$/)
+      const versioned = await fetch(new URL(script!, base))
+      expect(await versioned.text()).toBe('console.log(1)')
       const project = await fetch(base + '/design/session-test/_/project')
       expect(project.status).toBe(200)
       const payload = (await project.json()) as any
@@ -232,6 +286,7 @@ describe('preview routes', () => {
       expect(response.status).toBe(200)
       expect(response.headers.get('content-security-policy')).toContain("connect-src 'none'")
       expect(body).toContain('window.__DSX_PROJECT__=')
+      expect(body).not.toContain('"projectedScreen":')
       expect(body).toContain('data:font/woff2;base64,')
       expect(body).toContain('data:image/png;base64,')
       expect(body).not.toContain('_/assets/app.js')

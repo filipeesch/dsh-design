@@ -1,5 +1,6 @@
 /** HTML helpers for shell, not-found pages, and safe text. */
 import { readFile } from 'node:fs/promises'
+import { runningDesignBuild } from './build-identity.ts'
 
 /** Escape text for HTML content and attributes. */
 export function escapeHtml(value: string): string {
@@ -41,7 +42,10 @@ export async function renderShell(assetsDir: string, sessionId: string): Promise
   return template
     .replace('<head>', '<head><base href="' + assetBase + '">')
     .replaceAll('./assets/', assetBase)
-    .replaceAll('./app.', assetBase + 'app.')
+    .replace(
+      /\.\/app\.(js|css)(?=")/g,
+      (_, extension: string) => assetBase + 'app.' + extension + '?build=' + encodeURIComponent(runningDesignBuild.id),
+    )
     .replaceAll('href="assets/', 'href="' + assetBase)
     .replaceAll('src="assets/', 'src="' + assetBase)
 }

@@ -44,6 +44,8 @@ function findScreen(project: ProjectPayload | undefined, id: string | undefined)
   return project.screens.find((screen) => screen.id === id)
 }
 
+const ignoreOutcomeFocus = () => false
+
 /** Root preview application. */
 export function App() {
   const route = useRoute()
@@ -52,22 +54,21 @@ export function App() {
   const bootstrap = route.deterministic
     ? (globalThis as { __DSX_PROJECT__?: ProjectPayload }).__DSX_PROJECT__
     : undefined
-  const [loadError, setLoadError] = useState<string | undefined>()
-  const [state, setState] = useState<PreviewState>(() => emptyState())
-  const [ready, setReady] = useState(bootstrap !== undefined)
+  const [loadError, setLoadError] = useState<{ key: string; message: string } | undefined>()
+  const [state, setState] = useState<PreviewState>(() =>
+    route.embed || route.deterministic ? emptyState() : loadState(session),
+  )
   const [frameElement, setFrameElement] = useState<HTMLDivElement | null>(null)
   const [barHost, setBarHost] = useState<HTMLDivElement | null>(null)
   const malformedVariant = route.variantRaw !== undefined && route.variant === undefined
   const malformedCompare = route.compareRaw !== undefined && route.compare === undefined
   const variantParam = route.variant === undefined ? undefined : route.variant.group + ':' + route.variant.branch
-  // Only an explicit variant route needs its screen id; ordinary screen
-  // navigation keeps one project payload and one seeded state.
-  const variantScreen = variantParam === undefined ? undefined : route.screen
-  const projectionKey = JSON.stringify([session, variantScreen, variantParam])
-  const [snapshot, setSnapshot] = useState<{ key: string; project: ProjectPayload } | undefined>(() =>
-    bootstrap === undefined ? undefined : { key: projectionKey, project: bootstrap },
-  )
-  const project = snapshot?.key === projectionKey ? snapshot.project : undefined
+  const requestedId = route.screen
+  const projectionKey = JSON.stringify([session, requestedId, variantParam])
+  const [snapshot, setSnapshot] = useState<{ key: string; project: ProjectPayload } | undefined>()
+  const project = bootstrap ?? (snapshot?.project.session === session ? snapshot.project : undefined)
+  const loadingProjection = bootstrap === undefined && snapshot?.key !== projectionKey
+  const ready = project !== undefined && !loadingProjection
   const theme = project === undefined ? undefined : selectPalette(project, route)
   const palette = theme?.palette
   // The chrome unmounts while a new projection loads; keep the request here.
@@ -92,76 +93,61 @@ export function App() {
   const attachBar = useCallback((node: HTMLDivElement | null) => {
     setBarHost(node)
   }, [])
-  const revision = useRef(bootstrap?.revision ?? -1)
-  const lastTrees = useRef(new Map<string, DesignScreenNode>())
-  const appliedSeed = useRef<string | undefined>(undefined)
-
-  const updateProject = useCallback(
-    (next: ProjectPayload) => {
-      setSnapshot({ key: projectionKey, project: next })
-      revision.current = next.revision
-      for (const screen of next.screens) {
-        const errors = countDiagnostics(screen.diagnostics).errors
-        if (errors === 0 && screen.root !== undefined) lastTrees.current.set(screen.id, screen.root)
-      }
-      setState((current) => filterState(current, next))
-      setReady(true)
-    },
-    [projectionKey],
+  const appliedSeed = useRef<{ session: string; screen: string; state?: string; variant?: string } | undefined>(
+    undefined,
   )
 
   useEffect(() => {
-    if (bootstrap !== undefined) {
-      setState(emptyState())
-      for (const screen of bootstrap.screens) {
-        const errors = countDiagnostics(screen.diagnostics).errors
-        if (errors === 0 && screen.root !== undefined) lastTrees.current.set(screen.id, screen.root)
-      }
-      setReady(true)
-      return
-    }
-    let cancelled = false
-    setReady(false)
-    setLoadError(undefined)
-    setSnapshot(undefined)
-    lastTrees.current.clear()
-    fetchProject(session, undefined, {
-      ...(variantScreen === undefined ? {} : { screen: variantScreen }),
-      ...(variantParam === undefined ? {} : { variant: variantParam }),
-    })
-      .then((next) => {
-        if (cancelled) return
-        setState(route.embed || route.deterministic ? emptyState() : loadState(session))
-        updateProject(next)
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) setLoadError(error instanceof Error ? error.message : String(error))
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [session, variantScreen, variantParam, route.embed, route.deterministic, updateProject, bootstrap])
+    setState(route.embed || route.deterministic ? emptyState() : loadState(session))
+  }, [session, route.embed, route.deterministic])
 
   useEffect(() => {
-    if (route.deterministic) return
-    let subscribed = true
-    const unsubscribe = subscribeRevisions(session, (event) => {
-      if (event.rev > revision.current) {
-        fetchProject(session, event.rev, {
-          ...(variantScreen === undefined ? {} : { screen: variantScreen }),
-          ...(variantParam === undefined ? {} : { variant: variantParam }),
+    if (bootstrap !== undefined) return
+    const controller = new AbortController()
+    let committedToken: string | undefined
+    let observedToken: string | undefined
+    let pending = false
+    let hasProjection = false
+    const load = async () => {
+      if (pending || controller.signal.aborted) return
+      const startingToken = observedToken
+      pending = true
+      try {
+        const next = await fetchProject(session, {
+          screen: requestedId,
+          variant: variantParam,
+          signal: controller.signal,
         })
-          .then((next) => {
-            if (subscribed && next.revision > revision.current) updateProject(next)
-          })
-          .catch(() => undefined)
+        if (controller.signal.aborted) return
+        committedToken = next.token ?? String(next.revision)
+        hasProjection = true
+        setSnapshot({ key: projectionKey, project: next })
+        setState((current) => filterState(current, next))
+        setLoadError(undefined)
+      } catch (error) {
+        if (!controller.signal.aborted && !hasProjection) {
+          setLoadError({ key: projectionKey, message: error instanceof Error ? error.message : String(error) })
+        }
+      } finally {
+        pending = false
+        // Only follow up immediately if a token arrived during this request.
+        // An earlier check may lag this response; the next check settles it.
+        if (observedToken !== startingToken && observedToken !== committedToken) void load()
       }
-    })
-    return () => {
-      subscribed = false
-      unsubscribe()
     }
-  }, [session, route.deterministic, variantScreen, variantParam, updateProject])
+    setLoadError(undefined)
+    void load()
+    const unsubscribe = route.deterministic
+      ? undefined
+      : subscribeRevisions(session, (token) => {
+          observedToken = token
+          if (token !== committedToken) void load()
+        })
+    return () => {
+      controller.abort()
+      unsubscribe?.()
+    }
+  }, [session, requestedId, variantParam, projectionKey, route.deterministic, bootstrap])
 
   useEffect(() => {
     if (ready && !route.embed && !route.deterministic) saveState(session, state)
@@ -177,9 +163,9 @@ export function App() {
     entryId = project.config.entry
   }
   const requestedScreen = project === undefined ? undefined : findScreen(project, route.screen)
-  const activeScreen = project === undefined ? undefined : (requestedScreen ?? findScreen(project, entryId))
+  const activeScreen = loadingProjection ? undefined : (requestedScreen ?? findScreen(project, entryId))
   const screenId = activeScreen?.id
-  const missingScreen = project !== undefined && route.screen !== undefined && requestedScreen === undefined
+  const missingScreen = ready && route.screen !== undefined && requestedScreen === undefined
 
   const breakpoints = project?.config.breakpoints ?? []
   const breakpointName = breakpoints.some((candidate) => candidate.name === route.breakpoint)
@@ -195,7 +181,9 @@ export function App() {
       ? 'The variant query "' + route.variantRaw + '" is not a group:branch selection.'
       : undefined
   const variantError =
-    route.variant === undefined ? malformedVariantError : (malformedVariantError ?? project?.variantError)
+    route.variant === undefined || loadingProjection
+      ? malformedVariantError
+      : (malformedVariantError ?? project?.variantError)
   // The host rejects stale inputs to checks; explicit preview payloads may still
   // display their retained tree with diagnostics without claiming fresh evidence.
   const currentRoot = !projectFatal && screenErrors === 0 ? activeScreen?.root : undefined
@@ -204,11 +192,12 @@ export function App() {
       ? undefined
       : activeScreen === undefined
         ? undefined
-        : (activeScreen.lastValidRoot ?? lastTrees.current.get(activeScreen.id))
+        : activeScreen.lastValidRoot
   const tree = projectFatal || missingScreen || variantError !== undefined ? undefined : (currentRoot ?? retainedRoot)
   const treeFingerprint = useMemo(() => (tree === undefined ? undefined : fingerprintDesignTree(tree)), [tree])
   const screenStates = activeScreen?.states ?? []
-  const unknownState = route.state !== undefined && !screenStates.some((candidate) => candidate.name === route.state)
+  const unknownState =
+    ready && route.state !== undefined && !screenStates.some((candidate) => candidate.name === route.state)
   const namedState = screenStates.find((candidate) => candidate.name === route.state)
   const stateIssues =
     route.variant !== undefined && namedState !== undefined && tree !== undefined
@@ -230,15 +219,18 @@ export function App() {
     route.state !== undefined && namedState !== undefined && stateIssues.length === 0 ? route.state : undefined
 
   // A shared selector transition reseeds or clears that screen's starting
-  // view. A breakpoint change and a valid SSE reload leave the route key
+  // view. A breakpoint change and a revision refresh leave the route key
   // unchanged, so compatible local interaction survives.
   useEffect(() => {
-    if (!ready || screenId === undefined) return
-    const variantKey = route.variant === undefined ? '' : route.variant.group + ':' + route.variant.branch
-    const key = screenId + '|' + (route.state ?? '') + '|' + variantKey
-    if (appliedSeed.current === key) return
-    const first = appliedSeed.current === undefined
-    appliedSeed.current = key
+    if (!ready || screenId === undefined) {
+      if (requestedId !== undefined && appliedSeed.current?.screen !== requestedId) appliedSeed.current = undefined
+      return
+    }
+    const previous = appliedSeed.current
+    const first = previous?.session !== session
+    if (!first && previous.screen === screenId && previous.state === route.state && previous.variant === variantParam)
+      return
+    appliedSeed.current = { session, screen: screenId, state: route.state, variant: variantParam }
     const override =
       first && route.deterministic && bootstrap?.initialState?.screen === screenId
         ? bootstrap.initialState.seed
@@ -251,14 +243,27 @@ export function App() {
           ? true
           : stateCompatibility(tree, named, kitMetadata).length === 0
     setState((current) => {
-      // Initial mount keeps compatible persisted interaction when the route
-      // carries no named state; later shared-selector changes reset it.
-      if (first && route.state === undefined && override === undefined) return current
-      const cleared = clearScreenState(current, screenId)
-      if (first) return named !== undefined && compatible ? seedState(current, screenId, named) : cleared
-      return named === undefined || !compatible ? cleared : seedState(cleared, screenId, named)
+      if (named !== undefined && compatible) return seedState(current, screenId, named)
+      // A plain screen visit restores compatible interaction. A changed
+      // starting selector on the same screen starts a new interaction.
+      if (route.state !== undefined || (!first && previous.screen === screenId)) {
+        return clearScreenState(current, screenId)
+      }
+      return current
     })
-  }, [ready, screenId, route.state, route.deterministic, bootstrap, screenStates, route.variant, tree])
+  }, [
+    ready,
+    requestedId,
+    session,
+    screenId,
+    route.state,
+    route.deterministic,
+    bootstrap,
+    screenStates,
+    route.variant,
+    variantParam,
+    tree,
+  ])
 
   const imageUrl = useCallback(
     (path: string) => {
@@ -390,14 +395,14 @@ export function App() {
   const activeErrors = activeScreen?.diagnostics.filter((diagnostic) => diagnostic.severity === 'error') ?? []
   const overlayErrors: Diagnostic[] = [...new Set([...(projectFatal ? projectErrors : []), ...activeErrors])]
 
-  if (loadError !== undefined) {
+  if (loadError?.key === projectionKey && project === undefined) {
     return (
       <div role="alert" style={{ padding: 24, fontFamily: 'system-ui, sans-serif', color: '#991b1b' }}>
-        Preview failed to load: {loadError}
+        Preview failed to load: {loadError.message}
       </div>
     )
   }
-  if (project === undefined || !ready) {
+  if (project === undefined) {
     return <div style={{ padding: 24, fontFamily: 'system-ui, sans-serif' }}>Loading preview…</div>
   }
   if (malformedCompare && !route.deterministic) {
@@ -419,10 +424,13 @@ export function App() {
       </div>
     )
   }
-  if (route.compare !== undefined && !route.deterministic) return <CompareView route={route} project={project} />
+  if (route.compare !== undefined && !route.deterministic) {
+    return ready ? <CompareView route={route} project={project} /> : <div role="status">Loading preview…</div>
+  }
   const deterministicCompare = route.deterministic && (route.compare !== undefined || route.compareRaw !== undefined)
 
   const frame = breakpoint === undefined ? undefined : breakpoint
+  const reviewScreen = screenId ?? project.projectedScreen ?? entryId
   const variantIdentity = canonicalVariantIdentity(activeScreen?.effectiveSelection ?? {})
   const canvas = (
     <main className="dsx-stage">
@@ -476,7 +484,17 @@ export function App() {
           <p>{project.projectError}</p>
         </div>
       ) : null}
-      {palette === undefined ? null : frame === undefined || tree === undefined ? (
+      {loadingProjection ? (
+        loadError?.key === projectionKey ? (
+          <div className="dsx-notice error" role="alert">
+            Preview failed to load: {loadError.message}
+          </div>
+        ) : (
+          <div className="dsx-notice" role="status">
+            Loading preview…
+          </div>
+        )
+      ) : palette === undefined ? null : frame === undefined || tree === undefined ? (
         <div className="dsx-notice error" role="alert">
           <strong>{variantError === undefined ? 'No renderable screen' : 'Variant unavailable'}</strong>
           <p>
@@ -597,19 +615,20 @@ export function App() {
           }
           attachBar={attachBar}
           onSimulate={navigateOutcome}
-          consumeOutcomeFocus={consumeOutcomeFocus}
+          consumeOutcomeFocus={ready ? consumeOutcomeFocus : ignoreOutcomeFocus}
         >
           {canvas}
         </PreviewChrome>
       )}
       {!route.deterministic &&
       palette !== undefined &&
-      tree !== undefined &&
+      (loadingProjection || tree !== undefined) &&
       frame !== undefined &&
-      screenId !== undefined ? (
+      reviewScreen !== undefined ? (
         <ReviewOverlay
+          key={session}
           session={session}
-          screen={screenId}
+          screen={reviewScreen}
           revision={project.revision}
           breakpoint={breakpointName}
           {...(appliedState === undefined ? {} : { state: appliedState })}

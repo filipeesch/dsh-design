@@ -1,4 +1,4 @@
-/** HTTP routes for previews: shell, trusted assets, project, events, and passive media. */
+/** HTTP routes for previews: shell, trusted assets, project, revision checks, and passive media. */
 import { createReadStream } from 'node:fs'
 import { readFile, realpath, stat } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -500,10 +500,14 @@ export function createRouteHandler(
         }
         return
       }
-      if (endpoint === 'project') {
-        let project
+      if (endpoint === 'project' || endpoint === 'revision') {
+        if (endpoint === 'revision' && req.method !== 'GET' && !head) {
+          send(res, 405, 'Method not allowed.', 'text/plain; charset=utf-8', head, { allow: 'GET, HEAD' })
+          return
+        }
+        let snapshot
         try {
-          project = await runtime.get()
+          snapshot = await runtime.previewSnapshot()
         } catch (error) {
           send(
             res,
@@ -514,42 +518,23 @@ export function createRouteHandler(
           )
           return
         }
-        const requestedScreen = url.searchParams.get('screen') ?? project.entry
-        const body = JSON.stringify(
+        if (endpoint === 'revision') {
+          sendJson(res, 200, { token: snapshot.token }, head)
+          return
+        }
+        const requestedScreen = url.searchParams.get('screen') ?? undefined
+        sendJson(
+          res,
+          200,
           buildInteractivePayload(
             session,
-            runtime.currentRevision,
+            snapshot,
             registry.kitVersion,
-            project,
-            variantRequest(url.searchParams, requestedScreen ?? undefined),
+            requestedScreen,
+            variantRequest(url.searchParams, requestedScreen ?? snapshot.project.entry),
           ),
+          head,
         )
-        send(res, 200, body, 'application/json; charset=utf-8', head)
-        return
-      }
-      if (endpoint === 'events') {
-        await runtime.get().catch(() => undefined)
-        res.writeHead(200, {
-          'content-type': 'text/event-stream; charset=utf-8',
-          'cache-control': 'no-store',
-          connection: 'keep-alive',
-          'x-accel-buffering': 'no',
-        })
-        res.write('retry: 1000\n\n')
-        const listener = (revision: number): void => {
-          if (!res.writableEnded) res.write('event: revision\ndata: ' + JSON.stringify({ rev: revision }) + '\n\n')
-        }
-        const unsubscribe = runtime.subscribe(listener)
-        const ping = setInterval(() => {
-          if (!res.writableEnded) res.write(': ping\n\n')
-        }, 15000)
-        ping.unref?.()
-        const close = (): void => {
-          clearInterval(ping)
-          unsubscribe()
-        }
-        req.on('close', close)
-        res.on('close', close)
         return
       }
       if (endpoint === 'files') {
@@ -566,9 +551,10 @@ export function createRouteHandler(
     }
 
     // Shell requests: /design/<session>/[<screen>]
+    const deterministic = url.searchParams.get('deterministic') === '1'
     let project
     try {
-      project = await runtime.get()
+      project = deterministic ? await runtime.get() : (await runtime.previewSnapshot()).project
     } catch (error) {
       send(
         res,
@@ -602,7 +588,7 @@ export function createRouteHandler(
       return
     }
     try {
-      if (url.searchParams.get('deterministic') === '1') {
+      if (deterministic) {
         const assets = await collectDeterministicAssets(project)
         const deterministicScreen = url.searchParams.get('screen') ?? screen ?? project.entry
         const document = await deterministicDocument(

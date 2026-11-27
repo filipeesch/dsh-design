@@ -47,6 +47,8 @@ export interface WireVariant {
 export interface WireScreen {
   readonly id: string
   readonly file: string
+  /** Navigation title, available even when this screen’s tree was not requested. */
+  readonly title?: string
   /** Current parsed tree, when parsing produced one. */
   readonly root?: DesignScreenNode
   /** Last tree that validated without errors. */
@@ -79,6 +81,8 @@ export interface WireTheme {
 export interface ProjectPayload {
   readonly session: string
   readonly revision: number
+  readonly token?: string
+  readonly projectedScreen?: string
   readonly config: {
     readonly kitVersion: string
     readonly breakpoints: readonly Breakpoint[]
@@ -101,11 +105,6 @@ export interface ProjectPayload {
   readonly theme?: string
   readonly declaredThemes?: readonly string[]
   readonly initialState?: { readonly screen: string; readonly seed: NamedState }
-}
-
-/** Events payload from the SSE stream. */
-export interface RevisionEvent {
-  readonly rev: number
 }
 
 /** Every element id in a tree, plus radio group names. */

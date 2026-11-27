@@ -1,5 +1,11 @@
 # Verification evidence
 
+## Design preview performance (stabilize-design-preview)
+
+- `VITEST_MAX_WORKERS=1 pnpm run check` with a real Chrome for Testing executable passed all 510 tests in 38 files, including build, declaration checks, lint, formatting, and newline checks. The focused six-document HTTP/1.1 Chromium regression also passed on its own. A real file edit reached the foreground preview within one second; visibility return caught up without losing the input value. The visibility signal was emulated where headless Chromium reported all tabs visible.
+- The [installed bundle comparison](review/preview-transfer.md) measured 467,997 bytes on installed 0.1.3 versus 17,906 bytes on the packed candidate (96.17% fewer transferred preview body bytes through the first canvas) on the same 30-screen project with a panel-warmed cache and an idle agent. Both builds navigated all 30 screens and the tested map situation without a document reload.
+- The evidence establishes the preview connection regression and the transfer reduction, not a fix for system-wide slowdown. The live DSH profile was not modified.
+
 ## Design agent experience (improve-design-agent-experience)
 
 - The complete project gate passed with real sandboxed Chromium: 503 tests in

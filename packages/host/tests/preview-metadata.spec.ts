@@ -74,6 +74,73 @@ const variants =
   '<Screen id="home"><Variants id="layout" chosen="main"><Variant branch="main"><Button id="go" onPress={navigate("orders")}>Show orders</Button></Variant><Variant branch="alternate"><Button id="go" onPress={navigate("settings")}>Open settings</Button></Variant></Variants></Screen>'
 
 describe('interactive project metadata', () => {
+  it('projects only the selected screen and keeps compact labels, diagnostics, and last-valid data', async () => {
+    const server = await preview()
+    const ordersFile = join(server.folder, 'screens', 'orders.dsx')
+    await writeFile(
+      ordersFile,
+      '<Screen id="orders" title="  Order history  " states={{ open: { disclosures: { details: true } } }}><Disclosure id="details" label="Details"><Text>Orders canvas</Text></Disclosure></Screen>',
+    )
+    await writeFile(join(server.folder, 'screens', 'untitled.dsx'), '<Screen id="untitled" title="   " />')
+    const chosen = await server.project()
+    expect(chosen.token).toEqual(expect.any(String))
+    expect(chosen.projectedScreen).toBe('home')
+    expect(chosen.screens[0]).toHaveProperty('root')
+    const ordersSummary = {
+      id: 'orders',
+      file: 'screens/orders.dsx',
+      title: '  Order history  ',
+      diagnostics: [],
+      errors: 0,
+      blockingErrors: 0,
+      warnings: 0,
+    }
+    expect(chosen.screens[1]).toEqual(ordersSummary)
+    expect(chosen.screens[2]).not.toHaveProperty('title')
+    expect(JSON.stringify(chosen)).not.toContain('Orders canvas')
+
+    const orders = await server.project('?screen=orders')
+    expect(orders.token).toBe(chosen.token)
+    expect(orders.projectedScreen).toBe('orders')
+    expect(orders.screens[0]).not.toHaveProperty('root')
+    expect(orders.screens[0]).not.toHaveProperty('states')
+    expect(orders.screens[0]).not.toHaveProperty('variants')
+    expect(orders.screens[1]).toMatchObject({
+      ...ordersSummary,
+      root: expect.any(Object),
+      states: [{ name: 'open' }],
+      variants: [],
+    })
+    const unknown = await server.project('?screen=missing')
+    expect(unknown.projectedScreen).toBe('home')
+    expect(unknown.variantError).toBeUndefined()
+    const unknownVariant = await server.project('?screen=missing&variant=layout:alternate')
+    expect(unknownVariant.projectedScreen).toBeUndefined()
+    expect(unknownVariant.variantError).toBe('Screen "missing" is not part of this project.')
+    expect(unknownVariant.screens.every((screen) => !Object.hasOwn(screen as object, 'root'))).toBe(true)
+
+    await writeFile(ordersFile, '<Screen id="orders" title="Broken title"><Buton /></Screen>')
+    await server.runtime().reload()
+    const invalid = await server.project('?screen=orders')
+    expect(invalid.token).not.toBe(chosen.token)
+    expect(invalid.screens[1]).not.toHaveProperty('root')
+    expect(invalid.screens[1]).toMatchObject({
+      title: '  Order history  ',
+      blockingErrors: 1,
+      lastValidRoot: expect.any(Object),
+    })
+    const unselected = (await server.project()).screens[1]
+    expect(unselected).toMatchObject({ title: '  Order history  ', blockingErrors: 1, diagnostics: expect.any(Array) })
+    expect(unselected).not.toHaveProperty('lastValidRoot')
+    expect(unselected).not.toHaveProperty('states')
+
+    // The deterministic contract neither stamps nor narrows its screens.
+    const runtime = server.runtime()
+    const deterministic = buildPayload('preview-test', 0, KIT_VERSION, await runtime.get())
+    expect(deterministic).not.toHaveProperty('token')
+    expect(deterministic).not.toHaveProperty('projectedScreen')
+    expect(deterministic.screens[2]).toHaveProperty('root')
+  })
   it('replaces only the explicitly viewed screen’s graph and omits stale branch links', async () => {
     const server = await preview()
     const file = join(server.folder, 'screens', 'home.dsx')
@@ -91,6 +158,9 @@ describe('interactive project metadata', () => {
     ])
     const query = '?screen=home&variant=layout:alternate'
     const alternate = await server.project(query)
+    expect(alternate.projectedScreen).toBe('home')
+    expect(alternate.screens[0]).toMatchObject({ variant: { path: 'layout', branch: 'alternate' } })
+    expect(alternate.screens[1]).not.toHaveProperty('root')
     expect(alternate.relationships).toMatchObject([
       { id: chosen.relationships[0]?.id, label: 'Open settings', from: { screen: 'home' }, to: { screen: 'settings' } },
       chosen.relationships[1],
@@ -168,10 +238,13 @@ describe('interactive project metadata', () => {
       await page.goto(server.url + 'home?bp=mobile&variant=layout:alternate')
       await page.getByText('Alternate canvas').waitFor()
       const projectionReload = Promise.withResolvers<void>()
-      await page.route('**/_/project', async (route) => {
-        await projectionReload.promise
-        await route.continue()
-      })
+      await page.route(
+        (url) => url.pathname.endsWith('/_/project') && url.searchParams.get('screen') === 'result',
+        async (route) => {
+          await projectionReload.promise
+          await route.continue()
+        },
+      )
       await page.getByRole('button', { name: 'Approve' }).press('Enter')
       try {
         await page.getByText('Loading preview…').waitFor({ timeout: 5000 })

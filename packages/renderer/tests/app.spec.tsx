@@ -1,32 +1,12 @@
 // @vitest-environment jsdom
 import React from 'react'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { parseScreen } from '../../core/src/parse.ts'
-import { parseRoute } from '../src/route.ts'
+import { parseRoute, pushRoute } from '../src/route.ts'
 import { App } from '../src/app.tsx'
 import { emptyState, filterState } from '../src/state.ts'
 import type { ProjectPayload } from '../src/wire.ts'
-
-class MockEventSource {
-  static instances: MockEventSource[] = []
-  readonly listeners = new Map<string, ((event: unknown) => void)[]>()
-  closed = false
-  constructor(readonly url: string) {
-    MockEventSource.instances.push(this)
-  }
-  addEventListener(type: string, listener: (event: unknown) => void): void {
-    const list = this.listeners.get(type) ?? []
-    list.push(listener)
-    this.listeners.set(type, list)
-  }
-  close(): void {
-    this.closed = true
-  }
-  emit(type: string, data: unknown): void {
-    for (const listener of this.listeners.get(type) ?? []) listener({ data: JSON.stringify(data) })
-  }
-}
 
 function screenOf(source: string, id: string = 1): ProjectPayload['screens'][number] {
   const parsed = parseScreen(source, 'screens/' + id + '.dsx')
@@ -79,14 +59,11 @@ let current: ProjectPayload = payload(1, [screenOf(home(), 'home')])
 beforeEach(() => {
   current = payload(1, [screenOf(home(), 'home')])
   sessionStorage.clear()
-  MockEventSource.instances = []
-  ;(globalThis as Record<string, unknown>).EventSource = MockEventSource
   ;(globalThis as Record<string, unknown>).fetch = vi.fn(async (url: string) => {
-    const match = /rev=(\d+)/.exec(url)
     return {
       ok: true,
       status: 200,
-      json: async () => (match === null ? current : { ...current, revision: Number(match[1]) }),
+      json: async () => (url.endsWith('/_/revision') ? { token: String(current.revision) } : current),
     }
   })
   history.replaceState(null, '', '/design/session-test/')
@@ -117,13 +94,76 @@ describe('preview application', () => {
     expect(document.querySelector('.dsx-frame')?.getAttribute('data-breakpoint')).toBe('mobile')
   })
 
+  it('keeps the navigator and ignores a superseded projection, preserving state on return', async () => {
+    const details = screenOf('<Screen id="details" title="Details"><Text>Details canvas</Text></Screen>', 'details')
+    const main = screenOf(home(), 'home')
+    const projection = (id: string): ProjectPayload => ({
+      ...payload(
+        8,
+        [main, details].map((item) =>
+          item.id === id
+            ? item
+            : {
+                ...item,
+                title: String(item.root?.props.title),
+                root: undefined,
+                lastValidRoot: undefined,
+              },
+        ),
+      ),
+      token: 'one:8',
+      projectedScreen: id,
+    })
+    let release: (() => void) | undefined
+    let obsolete: AbortSignal | undefined
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const url = new URL(String(input), location.origin)
+      if (url.pathname.endsWith('/_/revision')) return Response.json({ token: 'one:8' })
+      const id = url.searchParams.get('screen') ?? 'home'
+      if (id === 'details' && release === undefined) {
+        obsolete = init?.signal ?? undefined
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+      }
+      return Response.json(projection(id))
+    })
+    render(<App />)
+    await screen.findByText('Hello preview')
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+    await screen.findByText('Drawer body')
+    act(() => pushRoute('/design/session-test/details'))
+    expect(screen.getByRole('link', { name: 'Details' })).toBeTruthy()
+    expect(screen.queryByText('Hello preview')).toBeNull()
+    await waitFor(() => expect(release).toBeDefined())
+    act(() => pushRoute('/design/session-test/home'))
+    await screen.findByText('Drawer body')
+    expect(obsolete?.aborted).toBe(true)
+    await act(async () => release?.())
+    expect(screen.queryByText('Details canvas')).toBeNull()
+    act(() => pushRoute('/design/session-test/details'))
+    await screen.findByText('Details canvas')
+    act(() => pushRoute('/design/session-test/home'))
+    await screen.findByText('Drawer body')
+  })
+
+  it('refreshes after a generation reset even when its numeric revision is lower', async () => {
+    current = { ...payload(10, [screenOf(home(), 'home')]), token: 'first:10' }
+    vi.mocked(fetch).mockImplementation(async (url) =>
+      Response.json(String(url).endsWith('/_/revision') ? { token: current.token } : current),
+    )
+    render(<App />)
+    await screen.findByText('Hello preview')
+    current = { ...payload(1, [screenOf(home().replace('Hello preview', 'After restart'), 'home')]), token: 'second:1' }
+    await screen.findByText('After restart')
+  })
+
   it('refetches on a revision and keeps an open drawer', async () => {
     render(React.createElement(App, { location: parseRoute('/design/session-test/', '') }))
     await screen.findByText('Hello preview')
     fireEvent.click(screen.getByRole('button', { name: 'Open' }))
     expect(await screen.findByText('Drawer body')).toBeTruthy()
     current = payload(2, [screenOf(home().replace('Hello preview', 'Hello edited'), 'home')])
-    MockEventSource.instances[0]!.emit('revision', { rev: 2 })
     expect(await screen.findByText('Hello edited')).toBeTruthy()
     expect(screen.getByText('Drawer body')).toBeTruthy()
   })
@@ -139,7 +179,6 @@ describe('preview application', () => {
         'home',
       ),
     ])
-    MockEventSource.instances[0]!.emit('revision', { rev: 2 })
     await waitFor(() => expect(screen.queryByText('Drawer body')).toBeNull())
     expect(screen.getByText('Hello preview')).toBeTruthy()
   })
@@ -163,7 +202,6 @@ describe('preview application', () => {
     expect(await screen.findByText('Hello preview')).toBeTruthy()
     expect(screen.getByText(/1 validation error/)).toBeTruthy()
     current = payload(3, [screenOf(home(), 'home')])
-    MockEventSource.instances[0]!.emit('revision', { rev: 3 })
     await waitFor(() => expect(screen.queryByText(/1 validation error/)).toBeNull())
   })
 
@@ -171,7 +209,7 @@ describe('preview application', () => {
     history.replaceState(null, '', '/design/session-test/?deterministic=1')
     render(React.createElement(App))
     await screen.findByText('Hello preview')
-    expect(MockEventSource.instances).toHaveLength(0)
+    expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith('/_/revision'))).toBe(false)
     expect(document.querySelector('.dsx-deterministic')).not.toBeNull()
   })
 
